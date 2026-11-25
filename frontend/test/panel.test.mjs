@@ -187,4 +187,33 @@ try {
     }
     await page.close();
   });
+  await test("audio source selection and loss in original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.audioCalls=[];
+      const s={schema_version:1,instance_id:"audio",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},audio_sources:[{id:"pcm",name:"Local PCM",status:"live",bands:[.4,.2,.1],bpm:120,beat_count:4}]};
+      window.audioFixture=s;
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.audioCalls.push(structuredClone(msg.payload));s.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];}
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("textbox",{name:"Zone name"}).fill("Music");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("audio_spectrum");
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByLabel("Audio source",{exact:true}).selectOption("pcm");
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Music",exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.audioCalls[0].effect.audio_source),"pcm");
+    await page.evaluate(()=>{window.audioFixture.audio_sources[0].status="lost";window.audioFixture.audio_sources[0].bands=null;window.audioFixture.audio_sources[0].bpm=null;});
+    await page.getByText("Source lost — fading to ambient",{exact:false}).waitFor();
+    assert.equal(await page.evaluate(()=>window.audioCalls.length),1);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

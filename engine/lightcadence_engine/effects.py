@@ -17,6 +17,7 @@ class EffectKind(StrEnum):
     RAINBOW = "rainbow"
     SCANNER = "scanner"
     PULSE = "pulse"
+    AUDIO_SPECTRUM = "audio_spectrum"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class Effect:
     brightness: float = 1.0
     color: tuple[float, float, float] = (1.0, 0.0, 0.0)
     width: float = 0.25
+    audio_source: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.kind, EffectKind):
@@ -54,11 +56,26 @@ class Effect:
         if not isinstance(self.color, tuple) or len(self.color) != 3:
             raise ValueError("color must be an immutable RGB triple")
         LightTarget(*self.color, self.brightness)
+        if self.kind is EffectKind.AUDIO_SPECTRUM:
+            if not isinstance(self.audio_source, str) or not self.audio_source.strip():
+                raise ValueError("select an audio source")
+        elif self.audio_source is not None:
+            raise ValueError("audio source is only valid for audio effects")
 
-    def render(self, elapsed: float, position: float) -> LightTarget:
+    def render(self, elapsed: float, position: float, audio=None) -> LightTarget:
         if (not isfinite(elapsed) or elapsed < 0 or
                 not isfinite(position) or not 0 <= position <= 1):
             raise ValueError("invalid elapsed time or position")
+        if self.kind is EffectKind.AUDIO_SPECTRUM:
+            bands = audio if audio is not None else (.06, .06, .06)
+            LightTarget(*bands, 1.)
+            # Spatially distribute bass, mids and treble across the existing path.
+            x = position * 2
+            weights = (max(0., 1 - x), 1 - abs(x - 1), max(0., x - 1))
+            rgb = tuple(a * w for a, w in zip(bands, weights))
+            peak = max(rgb)
+            return LightTarget(*(v / peak if peak else 0. for v in rgb),
+                               self.brightness * peak)
         phase = (elapsed % self.period_seconds) / self.period_seconds
         if self.kind is EffectKind.RAINBOW:
             return LightTarget(*colorsys.hsv_to_rgb((position + phase) % 1, 1, 1),

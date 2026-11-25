@@ -115,6 +115,7 @@ class SessionManager:
 
     def __init__(self, clock: Callable[[], float] = monotonic):
         self._clock = clock
+        self.audio_provider = None
         self._sessions: dict[str, _Session] = {}
         self._owners: dict[str, str] = {}
         self._requests: dict[str, tuple[tuple, str]] = {}
@@ -221,9 +222,11 @@ class SessionManager:
             raise SessionError("render time must be finite and monotonic")
         session.last_target_time = at
         session.sequence += 1
+        audio = (self.audio_provider(session.effect.audio_source, at)
+                 if self.audio_provider is not None and session.effect.audio_source is not None else None)
         for device, position in session.positions.items():
             frame = Frame(session.id, session.generation, device, session.sequence,
-                          at, session.effect.render(at - session.started_at, position))
+                          at, session.effect.render(at - session.started_at, position, audio))
             session.latest[device] = frame.sequence
             self._mailboxes[device] = frame
         return len(session.positions)

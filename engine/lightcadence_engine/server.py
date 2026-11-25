@@ -8,7 +8,8 @@ import re
 
 from aiohttp import web
 
-from .runtime import PhysicalRuntime, PreviewRuntime
+from .runtime import PhysicalRuntime, PreviewRuntime, fields
+from .audio import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE
 from .deployment import configured_runtime
 from .sessions import Conflict, StaleRevision
 
@@ -82,6 +83,42 @@ def create_app(token, runtime=None):
             return error("invalid_request", 400)
         return web.json_response(result)
 
+    async def audio_source(request):
+        if request.content_type != "application/json":
+            return error("invalid_content_type", 415)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or body.get("instance_id") != runtime.instance_id:
+                return error("stale_instance", 409)
+            if body.get("op") == "open":
+                fields(body, ("op", "instance_id", "name"))
+                source = runtime.audio.open(body["name"])
+                return web.json_response({"source_id": source, "sample_rate": SAMPLE_RATE,
+                                          "frame_samples": FRAME_SAMPLES, "format": "s16le_mono"})
+            if body.get("op") == "close":
+                fields(body, ("op", "instance_id", "source_id"))
+                runtime.audio.close(body["source_id"])
+                return web.json_response({"closed": True})
+            raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            return error("invalid_request", 400)
+
+    async def audio_frame(request):
+        if request.content_type != "application/octet-stream":
+            return error("invalid_content_type", 415)
+        if request.query.get("instance_id") != runtime.instance_id:
+            return error("stale_instance", 409)
+        try:
+            if request.content_length != FRAME_BYTES:
+                raise ValueError
+            sequence = int(request.query["sequence"])
+            runtime.audio.push(request.match_info["source"], sequence, await request.read())
+        except (ValueError, TypeError, OverflowError, KeyError):
+            return error("invalid_audio_frame", 400)
+        return web.json_response({"accepted": True})
+
+    app.router.add_post("/v1/audio/source", audio_source)
+    app.router.add_post("/v1/audio/frame/{source}", audio_frame)
     app.cleanup_ctx.append(lifecycle)
     app.router.add_get("/v1/state", state)
     # Separate route is registered only by explicit physical composition.

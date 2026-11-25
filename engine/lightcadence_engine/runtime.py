@@ -7,6 +7,7 @@ from uuid import uuid4
 from .effects import Effect, EffectKind, LightTarget, linear_channel
 from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
+from .audio import AudioHub
 
 
 def fields(value, required, optional=()):
@@ -29,7 +30,7 @@ def parse_start(body):
         identity(device)
     if len(set(devices)) != len(devices):
         raise ValueError("duplicate device")
-    params = fields(body["effect"], ("kind",), ("period_seconds", "brightness", "color", "width"))
+    params = fields(body["effect"], ("kind",), ("period_seconds", "brightness", "color", "width", "audio_source"))
     if not isinstance(params["kind"], str):
         raise ValueError("invalid effect kind")
     params = dict(params)
@@ -63,6 +64,8 @@ class PreviewRuntime:
         self.clock = clock
         self.instance_id = str(uuid4())
         self.manager = SessionManager(clock)
+        self.audio = AudioHub(clock)
+        self.manager.audio_provider = self.audio.levels
         self.targets = {}
 
     def tick(self):
@@ -86,6 +89,7 @@ class PreviewRuntime:
             "physical_output_enabled": False,
             "sessions": [asdict(s) for s in self.manager.snapshots()],
             "targets": self.targets,
+            "audio_sources": self.audio.snapshot(),
         }
 
     def command(self, body):
@@ -95,6 +99,7 @@ class PreviewRuntime:
         if op == "start":
             fields(body, ("op", "request_id", "zone_id", "devices", "effect"), ("positions",))
             devices, effect, positions = parse_start(body)
+            self.validate_audio(effect)
             self.manager.start(identity(body["request_id"]), identity(body["zone_id"]),
                                {d: DeviceState(False, LightTarget(0, 0, 0, 0)) for d in devices},
                                effect, StopPolicy.HOLD, positions)
@@ -111,6 +116,10 @@ class PreviewRuntime:
             raise ValueError("unknown preview operation")
         self.tick()
         return self.state()
+
+    def validate_audio(self, effect):
+        if effect.audio_source is not None and effect.audio_source not in self.audio.sources:
+            raise ValueError("unknown audio source")
 
     async def close(self):
         """Preview owns no device resources."""
@@ -146,6 +155,8 @@ class PhysicalRuntime(PreviewRuntime):
         profiles = tuple(profiles)
         self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock, journal=journal)
         self.manager = self.physical.manager
+        self.audio = AudioHub(clock)
+        self.manager.audio_provider = self.audio.levels
         self.targets = {}
         self._closing = False
         self._manual = {}
@@ -191,6 +202,7 @@ class PhysicalRuntime(PreviewRuntime):
             fields(body, ("op", "request_id", "zone_id", "devices", "effect"),
                    ("positions", "stop_policy"))
             devices, effect, positions = parse_start(body)
+            self.validate_audio(effect)
             await self.physical.start(identity(body["request_id"]), identity(body["zone_id"]),
                                       devices, effect, StopPolicy(body.get("stop_policy", "restore")),
                                       positions)

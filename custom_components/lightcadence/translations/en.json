@@ -3,10 +3,11 @@
     "step": {
       "user": {
         "title": "Connect to LightCadence",
-        "description": "Connect to the local engine. This development version supports preview only.",
+        "description": "Connect to the local engine. Only select physical candidate for a separately owner-authorized hardware test.",
         "data": {
           "port": "Local engine port",
-          "token": "Local engine token"
+          "token": "Local engine token",
+          "physical_candidate": "Enable physical candidate (unqualified hardware test)"
         }
       }
     },

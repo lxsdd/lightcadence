@@ -9,6 +9,7 @@ import re
 from aiohttp import web
 
 from .runtime import PhysicalRuntime, PreviewRuntime
+from .deployment import configured_runtime
 from .sessions import Conflict, StaleRevision
 
 RUNTIME = web.AppKey("runtime", PreviewRuntime)
@@ -66,6 +67,10 @@ def create_app(token, runtime=None):
             return error("invalid_content_type", 415)
         try:
             payload = await request.json()
+            if physical:
+                if not isinstance(payload, dict) or payload.get("instance_id") != runtime.instance_id:
+                    return error("stale_instance", 409)
+                payload = {k: v for k, v in payload.items() if k != "instance_id"}
             result = await runtime.command(payload) if physical else runtime.command(payload)
         except Conflict as exc:
             return error("device_conflict", 409, owners=exc.owners)
@@ -79,8 +84,8 @@ def create_app(token, runtime=None):
 
     app.cleanup_ctx.append(lifecycle)
     app.router.add_get("/v1/state", state)
-    # Separate route is registered only by explicit in-process composition.
-    # The installed CLI constructs the preview runtime and cannot switch modes.
+    # Separate route is registered only by explicit physical composition.
+    # No mode switch at runtime.
     app.router.add_post("/v1/physical" if physical else "/v1/preview", command)
     return app
 
@@ -91,7 +96,7 @@ def main():
     port = int(os.environ.get("LIGHTCADENCE_PORT", "17842"))
     if not 1 <= port <= 65535:
         raise ValueError("invalid local port")
-    web.run_app(create_app(token), host="127.0.0.1", port=port, access_log=None, print=None)
+    web.run_app(create_app(token, configured_runtime(os.environ)), host="127.0.0.1", port=port, access_log=None, print=None)
 
 
 if __name__ == "__main__":

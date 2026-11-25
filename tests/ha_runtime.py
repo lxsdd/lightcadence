@@ -139,9 +139,11 @@ async def main():
                                 "lightcadence/preview", entry_id=entry_id,
                                 payload={**payload, "devices": [a.id, bad]})
                             assert not denied["success"] and denied["error"]["code"] == "invalid_selection"
-                        empty = await command(ws, 8, "lightcadence/state", entry_id=entry_id)
+                        refused = await command(ws, 8, "lightcadence/physical", entry_id=entry_id, payload=payload)
+                        assert not refused["success"] and refused["error"]["code"] == "incompatible_engine"
+                        empty = await command(ws, 9, "lightcadence/state", entry_id=entry_id)
                         assert empty["result"]["sessions"] == []
-                        started = await command(ws, 9, "lightcadence/preview", entry_id=entry_id, payload=payload)
+                        started = await command(ws, 10, "lightcadence/preview", entry_id=entry_id, payload=payload)
                         assert started["success"], started
                         snapshot = started["result"]["sessions"][0]
                         assert set(snapshot["devices"]) == {a.id, b.id}
@@ -153,6 +155,7 @@ async def main():
                             (2, "lightcadence/catalog", {}),
                             (3, "lightcadence/state", {"entry_id": entry_id}),
                             (4, "lightcadence/preview", {"entry_id": entry_id, "payload": payload}),
+                            (5, "lightcadence/physical", {"entry_id": entry_id, "payload": payload}),
                         ]:
                             denied = await command(ws, i, kind, **args)
                             assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied

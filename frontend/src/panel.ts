@@ -2,12 +2,12 @@ import {LitElement, css, html, nothing} from "lit";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
-type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: false};
+type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type Session = {id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
-type Snapshot = {schema_version: 1; instance_id: string; output_mode: "preview"; physical_output_enabled: false; sessions: Session[]; targets: Record<string, {target: RGB}>};
-type Start = {op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number}};
-type Command = Start | {op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type Snapshot = {schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; sessions: Session[]; targets: Record<string, {target: RGB}>};
+type Start = {instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number}};
+type Command = Start | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse"};
 function observationLabel(light: Light): string {
@@ -19,7 +19,8 @@ function observationLabel(light: Light): string {
 }
 function explain(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
-  return ({device_conflict:"A selected lamp already belongs to another preview. Choose other lamps or stop that session.",
+  return ({device_conflict:"A selected lamp already belongs to another preview or show. Choose other lamps or stop that session.",
+    stale_instance:"The engine restarted. Refresh and explicitly start a new session." ,
     stale_revision:"The session changed on another client. Refresh before trying again.",
     invalid_selection:"The lamp registry changed. Refresh the selection.",
     unauthorized:"Access denied.", not_found:"No loaded LightCadence engine."} as Record<string,string>)[code]
@@ -70,7 +71,9 @@ class LightCadencePanel extends LitElement {
     if(changed.has("hass") && !changed.get("hass") && this.hass) void this.refresh(true);
   }
   private accept(s: Snapshot) {
-    if(s.schema_version!==1 || s.output_mode!=="preview" || s.physical_output_enabled!==false) throw new Error("incompatible preview API");
+    const physical=this.catalog?.physical_output_enabled===true;
+    if(s.schema_version!==1 || s.output_mode!==(physical?"physical_candidate":"preview") || s.physical_output_enabled!==physical || (physical && (s.hardware_qualified!==false || !Array.isArray(s.enrolled_devices)))) throw new Error("incompatible engine API");
+    if(this.snapshot && this.snapshot.instance_id!==s.instance_id) this.pendingStart=undefined;
     this.snapshot=s;
   }
   private async refresh(full=false) {
@@ -81,14 +84,14 @@ class LightCadencePanel extends LitElement {
       if(full || !this.entry || !this.catalog) {
         const cat=await this.hass.callWS<Catalog>({type:"lightcadence/catalog"});
         if(epoch!==this.epoch) return;
-        if(cat.schema_version!==1 || cat.physical_output_enabled!==false || cat.entries.length!==1) throw new Error("engine entry unavailable");
+        if(cat.schema_version!==1 || typeof cat.physical_output_enabled!=="boolean" || cat.entries.length!==1) throw new Error("engine entry unavailable");
         this.catalog=cat; this.entry=cat.entries[0];
         this.chosen=this.chosen.filter(id=>cat.lights.some(l=>l.id===id));
       }
       const state=await this.hass.callWS<Snapshot>({type:"lightcadence/state",entry_id:this.entry});
       if(epoch!==this.epoch) return;
       this.accept(state);
-      if(!this.online) this.status="Connected · preview only";
+      if(!this.online) this.status=state.physical_output_enabled?"Connected · hardware candidate (unqualified)":"Connected · preview only";
       this.online=true;
     } catch(error) {
       if(epoch===this.epoch) {this.online=false; this.entry=undefined; this.status=explain(error);}
@@ -96,20 +99,22 @@ class LightCadencePanel extends LitElement {
   }
   private async send(payload: Command) {
     if(!this.hass || !this.entry || !this.online || this.busy) return;
-    const epoch=++this.epoch; this.refreshing=false; this.busy=true; this.status="Applying preview command…";
+    const epoch=++this.epoch; this.refreshing=false; this.busy=true; this.status="Applying engine command…";
     try {
-      const state=await this.hass.callWS<Snapshot>({type:"lightcadence/preview",entry_id:this.entry,payload});
+      const physical=this.catalog?.physical_output_enabled===true;
+      const command=physical?{...payload,instance_id:payload.instance_id??this.snapshot?.instance_id}:payload;
+      const state=await this.hass.callWS<Snapshot>({type:physical?"lightcadence/physical":"lightcadence/preview",entry_id:this.entry,payload:command});
       if(epoch!==this.epoch) return;
       this.accept(state); this.pendingStart=undefined;
       if(payload.op==="start") {this.chosen=[]; this.zone="";}
-      this.status="Preview command confirmed";
+      this.status=state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
     } catch(error) {
       if(epoch===this.epoch) {
         this.status=explain(error);
         // Preserve a potentially delivered start for an explicit identical retry.
         // Known rejections did not create a session.
         const code=typeof error==="object" && error!==null && "code" in error ? String(error.code) : "";
-        if(["device_conflict","stale_revision","invalid_selection","invalid_request","not_found"].includes(code)) this.pendingStart=undefined;
+        if(["device_conflict","stale_revision","stale_instance","invalid_selection","invalid_request","not_found"].includes(code)) this.pendingStart=undefined;
       }
     } finally {if(epoch===this.epoch) {this.busy=false; void this.refresh();}}
   }
@@ -118,6 +123,7 @@ class LightCadencePanel extends LitElement {
     if(!this.zone.trim() || !this.chosen.length || !Number.isFinite(this.period) || this.period<=0 || !Number.isFinite(this.brightness) || this.brightness<0 || this.brightness>1) return;
     const payload:Start={op:"start",request_id:Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,"0")).join(""),zone_id:this.zone.trim(),devices:[...this.chosen],
       effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness}};
+    if(this.catalog?.physical_output_enabled) payload.instance_id=this.snapshot?.instance_id;
     this.pendingStart=payload;
     void this.send(payload);
   }
@@ -126,30 +132,31 @@ class LightCadencePanel extends LitElement {
   }
   private name(id:string) {return this.catalog?.lights.find(l=>l.id===id)?.name ?? id;}
   render() {
+    const physical=this.catalog?.physical_output_enabled===true;
     const active=this.snapshot?.sessions.filter(s=>s.phase!=="stopped")??[];
     const locked=new Set(active.flatMap(s=>s.devices));
     const formLocked=this.busy||!!this.pendingStart;
     return html`
       <main>
-        <header><div><h1>LightCadence</h1><p>Live preview workspace</p></div><span class="badge">${this.online?"Connected":"Disconnected"}</span></header>
-        <p class="notice">Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback.</p>
+        <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge">${this.online?"Connected":"Disconnected"}</span></header>
+        <p class="notice">${physical?"Hardware candidate — real lamp commands are enabled for enrolled devices only. Not hardware-qualified. Ordinary HA/Google Home actions are not coordinated. Colours are targets, not optical feedback.":"Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback."}</p>
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
         <div class="workspace">
-          <section aria-labelledby="setup"><h2 id="setup">New zone preview</h2>
+          <section aria-labelledby="setup"><h2 id="setup">${physical?"New zone show":"New zone preview"}</h2>
             <label>Zone name <input aria-label="Zone name" title="Label for this independent preview session" .value=${this.zone} ?disabled=${formLocked} @input=${(e:Event)=>this.zone=(e.target as HTMLInputElement).value}></label>
             <label>Effect <select .value=${this.effect} ?disabled=${formLocked} @change=${(e:Event)=>this.effect=(e.target as HTMLSelectElement).value}>${Object.entries(descriptions).map(([key,title])=>html`<option value=${key}>${title}</option>`)}</select></label>
             <label>Period (seconds) <input type="number" step="any" .value=${String(this.period)} ?disabled=${formLocked} @input=${(e:Event)=>this.period=(e.target as HTMLInputElement).valueAsNumber}></label>
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
             <h3>Lamps · ${this.chosen.length} selected</h3>
-            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${locked.has(l.id)?"In preview":l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
-            <button class="primary" ?disabled=${!this.online||this.busy||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":"Start preview"}</button>
+            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
+            <button class="primary" ?disabled=${!this.online||this.busy||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>
-          <section aria-labelledby="running"><h2 id="running">Running previews · ${active.length}</h2>
+          <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
           ${active.length?active.map(s=>html`<article><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>
             <div class="targets">${s.devices.map(id=>html`<div class="target"><span class="swatch" style=${"background:"+color(this.snapshot?.targets[id]?.target)}></span><span>${this.name(id)}</span><button title="Remove this lamp from this preview only; other sessions are unaffected" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"detach",session_id:s.id,revision:s.revision,device_id:id})}>Detach</button></div>`)}</div>
-            <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">Stop preview</button>
-          </article>`):html`<p>No active previews. Choose lamps and an effect to begin.</p>`}
+            <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>
+          </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}
           </section>
         </div>
       </main>`;

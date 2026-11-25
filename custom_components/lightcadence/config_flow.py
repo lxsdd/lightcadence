@@ -5,7 +5,7 @@ from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import EngineClient, EngineError
-from .const import DOMAIN, CONF_PORT, CONF_TOKEN, DEFAULT_PORT
+from .const import DOMAIN, CONF_PORT, CONF_TOKEN, DEFAULT_PORT, CONF_PHYSICAL
 
 
 class LightCadenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -18,7 +18,8 @@ class LightCadenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 client = EngineClient(async_get_clientsession(self.hass),
-                                      user_input[CONF_PORT], user_input[CONF_TOKEN])
+                                      user_input[CONF_PORT], user_input[CONF_TOKEN],
+                                      user_input.get(CONF_PHYSICAL, False))
                 await client.state()
             except ValueError:
                 errors["base"] = "invalid_config"
@@ -29,4 +30,5 @@ class LightCadenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", errors=errors, data_schema=vol.Schema({
             vol.Required(CONF_PORT, default=DEFAULT_PORT): vol.All(int, vol.Range(min=1, max=65535)),
             vol.Required(CONF_TOKEN): str,
+            vol.Optional(CONF_PHYSICAL, default=False): bool,
         }))

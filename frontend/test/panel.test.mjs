@@ -79,4 +79,31 @@ try {
       await page.close();
     });
   }
+  await test("physical candidate uses separate command with current instance",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.physicalCalls=[];
+      const s={schema_version:1,instance_id:"physical-instance",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a"],sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        window.physicalCalls.push(structuredClone(msg));
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.type==="lightcadence/physical" && msg.payload.op==="start")s.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];
+        if(msg.type==="lightcadence/physical" && msg.payload.op==="stop")s.sessions=[];
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Hardware test workspace",{exact:true}).waitFor();
+    await page.getByRole("textbox",{name:"Zone name"}).fill("Test zone");
+    await page.getByRole("checkbox").check();
+    await page.getByRole("button",{name:"Start hardware test"}).click();
+    await page.getByRole("heading",{name:"Test zone"}).waitFor();
+    await page.getByRole("button",{name:"Stop show"}).click();
+    await page.getByText("No active shows.",{exact:false}).waitFor();
+    const calls=await page.evaluate(()=>window.physicalCalls.filter(x=>x.payload));
+    assert.deepEqual(calls.map(x=>[x.type,x.payload.op,x.payload.instance_id]),[["lightcadence/physical","start","physical-instance"],["lightcadence/physical","stop","physical-instance"]]);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

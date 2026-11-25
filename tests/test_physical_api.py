@@ -56,6 +56,8 @@ class PhysicalApiTests(unittest.IsolatedAsyncioTestCase):
         await self.server.close()
 
     async def request(self, body=None, path="/v1/physical", headers=None):
+        if body is not None and path == "/v1/physical":
+            body = {"instance_id": self.runtime.instance_id, **body}
         async with self.client.request("GET" if body is None else "POST",
                                        self.server.make_url(path), json=body,
                                        headers=self.headers if headers is None else headers) as response:
@@ -105,10 +107,18 @@ class PhysicalApiTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(.03):
                 await asyncio.get_running_loop().sock_recvfrom(self.peer, 4096)
 
+    async def test_stale_instance_cannot_write_or_start(self):
+        for payload in (self.start_body(), {"op": "manual_set", "request_id": "manual", "device_id": "lamp", "state": MANUAL}):
+            code, error = await self.request({**payload, "instance_id": "old-engine"})
+            self.assertEqual((code, error["error"]), (409, "stale_instance"))
+        self.assertEqual(self.runtime.manager.snapshots(), ())
+        self.assertEqual(self.authority.writes, [])
+
     async def test_render_reconnect_conflict_and_confirmed_restore(self):
         state = await self.start()
         self.assertEqual(state["output_mode"], "physical_candidate")
         self.assertFalse(state["hardware_qualified"])
+        self.assertEqual(state["enrolled_devices"], ["lamp"])
         self.assertIn("lamp", state["targets"])
         session = state["sessions"][0]
         msg, _ = await self.receive()

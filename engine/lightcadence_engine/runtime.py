@@ -137,11 +137,13 @@ class PhysicalRuntime(PreviewRuntime):
             raise ValueError("physical candidate requires explicit opt-in")
         self.clock = clock
         self.instance_id = str(uuid4())
+        profiles = tuple(profiles)
         self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock)
         self.manager = self.physical.manager
         self.targets = {}
         self._closing = False
         self._manual = {}
+        self.enrolled_devices = tuple(sorted(p.device_id for p in profiles))
 
     def tick(self):
         if self._closing:
@@ -160,7 +162,7 @@ class PhysicalRuntime(PreviewRuntime):
     def state(self):
         result = super().state()
         result.update(output_mode="physical_candidate", physical_output_enabled=True,
-                      hardware_qualified=False,
+                      hardware_qualified=False, enrolled_devices=self.enrolled_devices,
                       transport_status={
                           device: asdict(status)
                           for device, status in self.physical.output.status.items()

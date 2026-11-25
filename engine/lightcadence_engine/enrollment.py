@@ -88,9 +88,9 @@ class ProfiledChroma:
             return False
         return await self.observe() == intent.state
 
-    def output_profile(self):
+    def output_profile(self, release=None):
         return DeviceOutput(self, self.profile.interval,
-                            prepare=self.transport.maintain, release=self.transport.close)
+                            prepare=self.transport.maintain, release=release or self.transport.close)
 
 
 class PhysicalSessions:
@@ -101,7 +101,7 @@ class PhysicalSessions:
     A failed batch publishes no session and closes all acquired local sockets.
     External clients and process crashes are not covered by these reservations.
     """
-    def __init__(self, profiles, state_port: StatePort, *, enabled=False, clock=monotonic):
+    def __init__(self, profiles, state_port: StatePort, *, enabled=False, clock=monotonic, journal=None):
         if enabled is not True:
             raise ValueError("physical enrollment requires explicit opt-in")
         profiles = tuple(profiles)
@@ -113,11 +113,24 @@ class PhysicalSessions:
                 raise ValueError("duplicate device identity, HA reference or endpoint")
         self.manager = SessionManager(clock)
         self._adapters = {p.device_id: ProfiledChroma(p, state_port, clock) for p in profiles}
+        self.journal = journal
         self.output = OutputCoordinator(self.manager, {
-            d: a.output_profile() for d, a in self._adapters.items()}, clock)
+            d: a.output_profile(lambda d=d: self._release(d)) for d, a in self._adapters.items()}, clock)
         self._reserved = set()
         self._pending = set()
         self._requests = {}
+
+    def _release(self, device):
+        self._adapters[device].transport.close()
+        if self.journal is not None:
+            self.journal.remove((device,))
+
+    def _check_recovery(self, devices):
+        if self.journal is not None:
+            self.journal.require_healthy()
+            blocked = set(devices) & self.journal.recovery
+            if blocked:
+                raise Conflict({d: "recovery_required" for d in blocked})
 
     async def start(self, request_id, zone_id, devices, effect, policy=StopPolicy.RESTORE,
                     positions=None):
@@ -148,9 +161,11 @@ class PhysicalSessions:
                      if self.manager.owner(d) is not None or d in self._reserved}
         if conflicts:
             raise Conflict(conflicts)
+        self._check_recovery(selected)
         self._reserved.update(selected)
         self._pending.add(request_id)
         attempted = []
+        recorded = False
         try:
             # Complete all snapshot reads before opening any UDP session.
             # Independent devices run concurrently; a failed child never
@@ -158,6 +173,9 @@ class PhysicalSessions:
             captured = await self._settle(
                 [self._adapters[d].observe() for d in selected])
             originals = dict(zip(selected, captured, strict=True))
+            if self.journal is not None:
+                self.journal.add(originals, policy)
+                recorded = True
             attempted = [self._adapters[d].transport for d in selected]
             await self._settle([adapter.acquire() for adapter in attempted])
             session = self.manager.start(request_id, zone_id, originals, effect, policy, coordinates)
@@ -166,6 +184,8 @@ class PhysicalSessions:
         except BaseException:
             for adapter in attempted:
                 adapter.close()
+            if recorded:
+                self.journal.remove(selected)
             raise
         finally:
             self._reserved.difference_update(selected)
@@ -192,6 +212,7 @@ class PhysicalSessions:
             raise SessionError("device not enrolled")
         if device_id in self._reserved:
             raise Conflict({device_id: "operation_pending"})
+        self._check_recovery((device_id,))
         self._reserved.add(device_id)
         try:
             owner = self.manager.owner(device_id)
@@ -231,13 +252,35 @@ class PhysicalSessions:
     async def manual_off(self, device_id):
         return await self.manual_power(device_id, False)
 
+    async def recover(self, device, record_id, decision):
+        if self.journal is None or decision not in ("keep", "restore") or device not in self._adapters:
+            raise SessionError("invalid recovery request")
+        if device in self._reserved or self.manager.owner(device) is not None:
+            raise Conflict({device: "operation_pending"})
+        self._reserved.add(device)
+        try:
+            original = self.journal.prepare_recovery(device, record_id)
+            adapter = self._adapters[device]
+            current = await adapter.observe()
+            if decision == "restore" and current != original:
+                if await self._confirmed_write(adapter, original) != "confirmed":
+                    return "unconfirmed"
+            self.journal.remove((device,))
+            return "confirmed"
+        finally:
+            self._reserved.discard(device)
+
     async def close(self):
         """Called after command admission and rendering have stopped."""
         try:
             await self.output.drain()
         finally:
-            for adapter in self._adapters.values():
-                adapter.transport.close()
+            try:
+                for adapter in self._adapters.values():
+                    adapter.transport.close()
+            finally:
+                if self.journal is not None:
+                    self.journal.close()
 
     def tick(self):
         for session in self.manager.snapshots():

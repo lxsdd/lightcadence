@@ -6,11 +6,12 @@ type Light = {id: string; entity_id: string; name: string; area_id: string | nul
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type Session = {id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
-type Snapshot = {schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
+type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
+type Snapshot = {recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
 type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
-type Command = Start | Manual | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type Command = Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse"};
@@ -23,7 +24,7 @@ function observationLabel(light: Light): string {
 }
 function explain(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
-  return ({device_conflict:"A selected lamp already belongs to another preview or show. Choose other lamps or stop that session.",
+  return ({device_conflict:"A selected lamp already belongs to another preview or show, or requires recovery. Choose other lamps or resolve the affected session.",
     stale_instance:"The engine restarted. Refresh and explicitly start a new session." ,
     stale_revision:"The session changed on another client. Refresh before trying again.",
     invalid_selection:"The lamp registry changed. Refresh the selection.",
@@ -121,7 +122,7 @@ class LightCadencePanel extends LitElement {
       if(payload.op==="start") this.pendingStart=undefined;
       if(manual) this.pendingManual=undefined;
       if(payload.op==="start") {this.chosen=[]; this.zone="";}
-      this.status=manual?(state.manual_result==="confirmed"?"Manual state readback confirmed (not optical confirmation)":"Manual outcome unconfirmed — inspect device before another command"):state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
+      this.status=payload.op==="recover"?(state.manual_result==="confirmed"?"Recovery resolved after state readback":"Recovery unconfirmed — inspect the lamp before making a new decision"):manual?(state.manual_result==="confirmed"?"Manual state readback confirmed (not optical confirmation)":"Manual outcome unconfirmed — inspect device before another command"):state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
     } catch(error) {
       if(epoch===this.epoch) {
         this.status=explain(error);
@@ -163,8 +164,11 @@ class LightCadencePanel extends LitElement {
   render() {
     const physical=this.catalog?.physical_output_enabled===true;
     const active=this.snapshot?.sessions.filter(s=>s.phase!=="stopped")??[];
+    const recovery=this.snapshot?.recovery_required??[];
+    const blocked=new Set(recovery.map(r=>r.device_id));
+    const fault=this.snapshot?.recovery_journal_fault===true;
     const locked=new Set(active.flatMap(s=>s.devices));
-    const formLocked=this.busy||!!this.pendingStart;
+    const formLocked=this.busy||!!this.pendingStart||fault;
     return html`
       <main>
         <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
@@ -178,8 +182,8 @@ class LightCadencePanel extends LitElement {
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
             ${physical?html`<label>Stop behaviour <select .value=${this.stopPolicy} ?disabled=${formLocked} @change=${(e:Event)=>this.stopPolicy=(e.target as HTMLSelectElement).value as StopPolicy}><option value="restore">Restore original state</option><option value="hold">Hold last state</option><option value="off">Turn off</option></select></label>`:nothing}
             <h3>Lamps · ${this.chosen.length} selected</h3>
-            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
-            <button class="primary" ?disabled=${!this.online||this.busy||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
+            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||blocked.has(l.id)||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${blocked.has(l.id)?"Recovery required":locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
+            <button class="primary" ?disabled=${!this.online||this.busy||fault||this.chosen.some(id=>blocked.has(id))||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>
           <div class="right-stack"><section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
@@ -188,11 +192,12 @@ class LightCadencePanel extends LitElement {
             <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}
           </section>
+        ${physical&&(fault||recovery.length)?html`<section aria-labelledby="recovery"><h2 id="recovery">Recovery required</h2><p>Interrupted shows are never restarted automatically. Check the actual lamp before choosing to keep its current state or explicitly restore its recorded original state. Restoring may overwrite changes made outside LightCadence.</p>${fault?html`<p role="alert">Journal unavailable. New starts and manual actions are blocked. Inspect local storage and restart safely.</p>`:nothing}${recovery.map(r=>html`<article><h3>${this.name(r.device_id)}</h3><p>Recorded: ${r.original.power?"On":"Off"} · ${Math.round(r.original.target.brightness*100)}% · ${r.policy}</p><p>${r.binding_matches?"Identity will be rechecked":"Binding changed — recovery blocked"}</p>${(["keep","restore"] as const).map(decision=>html`<button ?disabled=${!this.online||this.busy||fault||!r.binding_matches||!this.catalog?.lights.some(l=>l.id===r.device_id)} @click=${()=>this.snapshot&&this.send({op:"recover",instance_id:this.snapshot.instance_id,device_id:r.device_id,record_id:r.record_id,decision})}>${decision==="keep"?"Keep current state":"Restore recorded state"}</button> `)}</article>`)}</section>`:nothing}
         ${physical?html`<section class="manual" aria-labelledby="manual"><h2 id="manual">Manual lamp control</h2><p>Take the selected lamp out of any running show before changing it. Other lamps continue. No automatic retry after an uncertain result.</p>
           <label>Manual lamp <select aria-label="Manual lamp" .value=${this.manualDevice} ?disabled=${this.busy||!!this.pendingManual} @change=${(e:Event)=>this.manualDevice=(e.target as HTMLSelectElement).value}><option value="">Select a lamp</option>${this.catalog?.lights.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
           <label>Manual colour <input aria-label="Manual colour" type="color" .value=${this.manualColor} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualColor=(e.target as HTMLInputElement).value}></label>
           <label>Manual brightness (%) <input aria-label="Manual brightness (%)" type="number" min="1" max="100" step="1" .value=${String(this.manualBrightness)} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualBrightness=(e.target as HTMLInputElement).valueAsNumber}></label>
-          ${this.pendingManual?html`<button ?disabled=${!this.online||this.busy} @click=${()=>this.manual(false)}>Check same manual request</button><button ?disabled=${this.busy} @click=${()=>{this.pendingManual=undefined;this.status="Manual outcome may be uncertain. Inspect the device before a new action.";}}>Clear pending request</button>`:html`<button ?disabled=${!this.online||this.busy||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(false)}>Apply colour and turn on</button> <button ?disabled=${!this.online||this.busy||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(true)}>Turn off lamp</button>`}
+          ${this.pendingManual?html`<button ?disabled=${!this.online||this.busy} @click=${()=>this.manual(false)}>Check same manual request</button><button ?disabled=${this.busy} @click=${()=>{this.pendingManual=undefined;this.status="Manual outcome may be uncertain. Inspect the device before a new action.";}}>Clear pending request</button>`:html`<button ?disabled=${!this.online||this.busy||fault||blocked.has(this.manualDevice)||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(false)}>Apply colour and turn on</button> <button ?disabled=${!this.online||this.busy||fault||blocked.has(this.manualDevice)||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(true)}>Turn off lamp</button>`}
         </section>`:nothing}
         </div>
         </div>

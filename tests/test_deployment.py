@@ -14,7 +14,7 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / "devices.json"
-        self.env = {"LIGHTCADENCE_MODE": "physical_candidate", "LIGHTCADENCE_DEVICE_FILE": str(self.path)}
+        self.env = {"LIGHTCADENCE_MODE": "physical_candidate", "LIGHTCADENCE_DEVICE_FILE": str(self.path), "LIGHTCADENCE_JOURNAL_DIR": tmp.name}
         self.device = {"ha_registry_id": "synthetic", "model": "synthetic", "firmware": "1",
                        "host": "127.0.0.1", "interval": .02, "lan_id": "0x1234"}
         self.document = {"schema_version": 1, "owner_hardware_test": True, "devices": [self.device]}

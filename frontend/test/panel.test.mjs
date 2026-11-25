@@ -120,6 +120,32 @@ try {
     assert.equal(calls[3].payload.device_id,"a");
     await page.close();
   });
+  await test("recovery blocks new commands and requires explicit decision",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.recoveryCalls=[];
+      const s={schema_version:1,instance_id:"restarted",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a"],sessions:[],targets:{},recovery_required:[{device_id:"a",record_id:"record",original:{power:true,target:{red:1,green:0,blue:0,brightness:.5}},policy:"restore",binding_matches:true}]};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.recoveryCalls.push(structuredClone(msg));s.recovery_required=[];return {...structuredClone(s),manual_result:"confirmed"};}
+        return structuredClone(s);
+      }};
+    });
+    await page.getByRole("heading",{name:"Recovery required",exact:true}).waitFor();
+    assert.equal(await page.getByRole("checkbox").isDisabled(),true);
+    await page.getByLabel("Manual lamp",{exact:true}).selectOption("a");
+    assert.equal(await page.getByRole("button",{name:"Turn off lamp"}).isDisabled(),true);
+    assert.equal(await page.evaluate(()=>window.recoveryCalls.length),0);
+    await page.getByRole("button",{name:"Keep current state"}).click();
+    await page.getByRole("status").filter({hasText:"Recovery resolved"}).waitFor();
+    assert.equal(await page.getByRole("checkbox").isDisabled(),false);
+    const calls=await page.evaluate(()=>window.recoveryCalls);
+    assert.deepEqual(calls.map(x=>x.payload),[{op:"recover",instance_id:"restarted",device_id:"a",record_id:"record",decision:"keep"}]);
+    await page.close();
+  });
   await test("responsive HA content surface resizes without viewport changes",async()=>{
     const page=await browser.newPage({viewport:{width:1920,height:1400}});
     await page.goto(origin);

@@ -22,7 +22,7 @@ starts; stop/detach remain available for existing sessions if a registry
 entry changes. Admin-only physical WebSocket supports cooperative manual_set
 with exact linear RGB state, not interception of ordinary HA or Google Home
 actions. Device identity is protocol-reported, not cryptographic. No hardware
-qualification, durable recovery journal or automatic restart/restore claim.
+qualification or automatic restart/restore claim.
 Actual installation and hardware commands require separate owner permission.
 
 
@@ -36,3 +36,28 @@ an uncertain result, with no automatic retry. Explicit retry of the same
 request ID cannot replay a recorded uncertain command. Ordinary HA light
 service calls, vendor apps and Google Home are still outside this route.
 Native HA and browser tests use synthetic peers/state only.
+
+
+Physical candidate deployment also requires a dedicated owner-local writable
+journal directory (LIGHTCADENCE_JOURNAL_PATH in the overlay), owned by the
+container UID. The rest of the container stays read-only. Do not delete,
+replace or share the journal while a candidate is running. Preserve it across
+container restarts, and include it in local backup/rollback handling. The
+engine holds a process-exclusive lock and atomically persists complete original
+RGB state before acquisition. It removes the record only after release of the
+transport or confirmed restore/stop; cooperating manual takeover removes it
+before the subsequent manual command. No per-frame disk I/O. A failed
+journal write blocks new starts/manual commands, not ordinary HA services.
+
+After an interrupted show, no session, frame, or stop is replayed. The
+recorded device is quarantined until the administrator explicitly chooses
+keep current state or restore recorded original state in the same responsive
+panel. Both require a matching configured binding and a fresh identity-bound
+read; restoration requires independent matching readback. Each attempted
+recovery rotates the durable record ID before any device write, so an old
+request cannot repeat an uncertain write. External LAN clients can change
+state; the UI warns that explicit restore may overwrite later changes.
+A binding change/corrupt journal needs investigation rather than a blind
+reset. Crash/power-loss durability depends on the actual local filesystem.
+No automatic restart, physical hardware proof or protection against
+external writers is implied.

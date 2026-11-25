@@ -214,7 +214,7 @@ class YeelightLanStatePort:
             return True
 
 
-def compose_lan_candidate(bindings, *, enabled=False, timeout=2.0):
+def compose_lan_candidate(bindings, *, enabled=False, timeout=2.0, journal=None):
     """Explicit composition for future owner-approved use; opens no sockets.
 
     No change to the installed preview CLI or HA service routing.
@@ -223,4 +223,4 @@ def compose_lan_candidate(bindings, *, enabled=False, timeout=2.0):
         raise ValueError("physical candidate requires explicit opt-in")
     bindings = tuple(bindings)
     port = YeelightLanStatePort(bindings, timeout=timeout)
-    return PhysicalRuntime([b.profile for b in bindings], port, enabled=True)
+    return PhysicalRuntime([b.profile for b in bindings], port, enabled=True, journal=journal)

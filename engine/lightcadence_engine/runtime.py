@@ -138,13 +138,13 @@ class PhysicalRuntime(PreviewRuntime):
     Deployment requires explicit local configuration; hardware remains unqualified.
     """
 
-    def __init__(self, profiles, state_port, *, enabled=False, clock=monotonic):
+    def __init__(self, profiles, state_port, *, enabled=False, clock=monotonic, journal=None):
         if enabled is not True:
             raise ValueError("physical candidate requires explicit opt-in")
         self.clock = clock
         self.instance_id = str(uuid4())
         profiles = tuple(profiles)
-        self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock)
+        self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock, journal=journal)
         self.manager = self.physical.manager
         self.targets = {}
         self._closing = False
@@ -175,13 +175,16 @@ class PhysicalRuntime(PreviewRuntime):
                           if self.manager.owner(device) == status.session_id
                           and self.manager.snapshot(status.session_id).generation == status.generation
                       })
+        journal = self.physical.journal
+        result.update(recovery_required=journal.snapshot() if journal is not None else [],
+                      recovery_journal_fault=journal.fault if journal is not None else False)
         return result
 
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",
-                               "session_id", "revision", "device_id", "stop_policy", "state"))
+                               "session_id", "revision", "device_id", "stop_policy", "state", "record_id", "decision"))
         op = body["op"]
         manual_result = None
         if op == "start":
@@ -198,6 +201,10 @@ class PhysicalRuntime(PreviewRuntime):
         elif op == "stop":
             fields(body, ("op", "session_id", "revision"))
             await self.physical.stop(identity(body["session_id"]), body["revision"])
+        elif op == "recover":
+            fields(body, ("op", "device_id", "record_id", "decision"))
+            manual_result = await self.physical.recover(identity(body["device_id"]),
+                identity(body["record_id"]), body["decision"])
         elif op in ("manual_set", "manual_off", "manual_on"):
             fields(body, ("op", "request_id", "device_id", "state") if op == "manual_set" else
                    ("op", "request_id", "device_id"))
@@ -231,6 +238,6 @@ class PhysicalRuntime(PreviewRuntime):
 
     async def close(self):
         # The render task and HTTP handlers must have ended first. No blind
-        # restore on shutdown: crash recovery needs a separate durable journal.
+        # restore on shutdown: durable entries remain for explicit recovery.
         self._closing = True
         await self.physical.close()

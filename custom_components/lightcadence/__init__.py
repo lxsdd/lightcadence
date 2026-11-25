@@ -55,7 +55,7 @@ async def _bridge(hass, connection, msg, mutate=False, physical=False):
                 raise EngineError("incompatible_engine")
             validate_preview_selection(hass, payload)
             if physical:
-                if payload.get("op") in ("manual_set", "manual_off", "manual_on") and payload.get("device_id") not in {l["id"] for l in light_catalog(hass)}:
+                if payload.get("op") in ("manual_set", "manual_off", "manual_on", "recover") and payload.get("device_id") not in {l["id"] for l in light_catalog(hass)}:
                     raise ValueError("invalid manual selection")
                 result = await client.physical_command(payload)
             else:

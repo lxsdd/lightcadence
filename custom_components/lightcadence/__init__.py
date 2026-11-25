@@ -8,9 +8,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .catalog import light_catalog, validate_preview_selection
 from .client import EngineClient, EngineError
 from .const import DOMAIN, CONF_PORT, CONF_TOKEN
+from .panel import register_panel
 
 
 async def async_setup(hass, config):
+    if not await register_panel(hass):
+        return False
     websocket_api.async_register_command(hass, ws_state)
     websocket_api.async_register_command(hass, ws_preview)
     websocket_api.async_register_command(hass, ws_catalog)

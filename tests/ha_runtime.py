@@ -97,6 +97,13 @@ async def main():
                 hass.states.async_set(b.entity_id, "off", {"friendly_name": "Synthetic B"})
                 async with ClientSession() as session:
                     async with await auth(session, admin) as ws:
+                        panels = await command(ws, 100, "get_panels")
+                        panel = panels["result"]["lightcadence"]
+                        assert panel["config"]["_panel_custom"]["name"] == "lightcadence-panel"
+                        assert panel["config"]["_panel_custom"]["module_url"] == "/lightcadence_assets/panel.js"
+                        async with session.get(f"http://127.0.0.1:{HA_PORT}/lightcadence_assets/panel.js") as asset:
+                            assert asset.status == 200
+                            assert "lightcadence-panel" in await asset.text()
                         catalog = await command(ws, 1, "lightcadence/catalog")
                         assert catalog["success"], catalog
                         assert catalog["result"]["entries"] == [entry_id]
@@ -122,6 +129,8 @@ async def main():
                         assert set(snapshot["devices"]) == {a.id, b.id}
                         assert started["result"]["physical_output_enabled"] is False
                     async with await auth(session, ordinary) as ws:
+                        panels = await command(ws, 100, "get_panels")
+                        assert "lightcadence" not in panels["result"]
                         for i, kind, args in [
                             (1, "lightcadence/catalog", {}),
                             (2, "lightcadence/state", {"entry_id": entry_id}),
@@ -142,7 +151,7 @@ async def main():
                         assert await hass.config_entries.async_unload(entry_id)
                         missing = await command(ws, 3, "lightcadence/state", entry_id=entry_id)
                         assert not missing["success"] and missing["error"]["code"] == "not_found"
-                print("HA_RUNTIME_CONFIG_FLOW_AUTH_REGISTRY_RENAME_RECONNECT_STOP=PASS")
+                print("HA_RUNTIME_CONFIG_FLOW_AUTH_REGISTRY_RENAME_RECONNECT_STOP=PASS\\nHA_RUNTIME_ADMIN_PANEL_ASSET=PASS")
             finally:
                 await hass.async_stop()
     finally:

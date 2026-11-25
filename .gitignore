@@ -20,3 +20,6 @@ local/
 data/
 secrets.yaml
 coverage/
+
+frontend/node_modules/
+custom_components/lightcadence/frontend/

@@ -3,6 +3,7 @@ on:
   push:
     branches: [main, 'work/**']
     paths:
+      - 'frontend/**'
       - 'engine/**'
       - 'custom_components/**'
       - 'tests/**'
@@ -13,6 +14,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - 'frontend/**'
       - 'engine/**'
       - 'custom_components/**'
       - 'tests/**'
@@ -35,6 +37,16 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Build and typecheck original Lit panel
+        run: |
+          cd frontend
+          npm install --no-audit --no-fund
+          npm run build
+      - name: Production panel desktop and mobile browser regressions
+        run: |
+          cd frontend
+          npx --no-install playwright install chromium
+          npm test
       - name: Build local engine container (no publish)
         run: docker build -t lightcadence-ci .
       - name: Compile original engine and HA integration

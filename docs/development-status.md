@@ -20,3 +20,11 @@ Original core and real loopback HTTP regressions run in engine-core; HA native
 runtime and frontend/browser gates must be added before block 1 completion.
 Next: validate HA config/bridge in real HA test runtime, build the shared Lit
 panel on these commands, and qualify the device transport/stop handover path.
+
+Native administrator-only HA panel and same-origin bundled Lit UI are now
+implemented, including catalog selection, preview start/stop/detach, server
+snapshots, conflict feedback, reconnect and responsive layout. Build frontend
+with `cd frontend && npm install && npm run build` before copying the integration.
+No built bundle is committed. Browser tests use synthetic HA responses; native
+HA test separately checks actual panel registration and asset serving. Physical
+output remains disabled. Exact dependency lock and full security review pending.

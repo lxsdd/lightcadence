@@ -21,9 +21,16 @@ rejects final octets 0/255 because network masks are not yet modeled.
 
 Software qualification: real UDP loopback sockets, a synthetic peer, original
 coordinator and session manager. No external network or real lamp. No
-positive physical output, confirmed restore, native HA handover, scheduling
-of keepalive, device profile enrollment, or device identity qualification.
+positive physical output, confirmed restore, native HA handover, device profile enrollment, or device identity qualification.
 The preview runtime is unchanged and cannot open this transport. Stop/restore
 returns unconfirmed without a speculative write and retains the coordinator's
 lease. Real stop/restore and end-to-end activation remain to be implemented
 and owner-authorized before physical use.
+
+The opt-in output profile now schedules renewal through the existing per-device
+worker. It uses request-send time for expiry and rejects renewal after the
+previous validity window. During a handshake only the latest mailbox is
+consumed after a fresh ownership/generation/handover check. Failure closes the
+transport without automatic acquisition. Stop and manual detach wait for the
+in-flight handshake and prevent subsequent color frames. This is loopback-only
+software behavior; no physical activation, identity or restore claim.

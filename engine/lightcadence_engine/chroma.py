@@ -160,11 +160,14 @@ class ChromaV2Adapter:
             self._socket = sock
             sock.setblocking(False)
             sock.connect(self.endpoint)
+            sent_at = self.clock()
             request_id = self._send("udp_sess_new", [])
             self._token = await self._reply(request_id, self._token_reply)
             if self._socket is not sock:
                 raise ChromaError("transport changed during acquisition")
-            self._expires = self.clock() + 10
+            self._expires = sent_at + 10
+            if self.clock() >= self._expires:
+                raise ChromaError("acquisition response arrived after validity window")
         except BaseException:
             self.close()
             raise
@@ -178,6 +181,8 @@ class ChromaV2Adapter:
         token = self._token
         sock = self._socket
         try:
+            sent_at = self.clock()
+            previous_expiry = self._expires
             request_id = self._send("udp_sess_keep_alive", ["keeplive_interval", "10"], token)
 
             def validate(obj):
@@ -191,12 +196,32 @@ class ChromaV2Adapter:
             await self._reply(request_id, validate)
             if self._socket is not sock:
                 raise ChromaError("transport changed during renewal")
-            self._expires = self.clock() + 10
+            if self.clock() >= previous_expiry:
+                raise ChromaError("renewal response arrived after previous validity window")
+            self._expires = sent_at + 10
         except BaseException:
             self.close()
             raise
         finally:
             self._busy = False
+
+    async def maintain(self):
+        """Renew an already acquired session before its conservative expiry.
+
+        Called only by the owning output worker, under its per-device lock.
+        Never acquires or retries a failed session. A slow handshake cannot
+        extend the old validity window by the response delay.
+        """
+        if not self.ready:
+            self.close()
+            raise ChromaError("session unavailable; explicit acquisition required")
+        if self.clock() >= self._expires - max(2.0, self.timeout):
+            await self.renew()
+
+    def output_profile(self, interval):
+        """Bind the maintenance hook to the original output coordinator."""
+        from .output import DeviceOutput
+        return DeviceOutput(self, interval, prepare=self.maintain)
 
     async def send_frame(self, frame: Frame):
         if frame.device_id != self.device_id:

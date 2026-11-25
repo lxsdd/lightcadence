@@ -9,7 +9,7 @@ import asyncio
 from dataclasses import dataclass
 from math import isfinite
 from time import monotonic
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 
 from .sessions import Frame, Phase, SessionManager, SessionSnapshot, StopIntent
 
@@ -26,12 +26,15 @@ class Adapter(Protocol):
 class DeviceOutput:
     adapter: Adapter
     interval: float
+    prepare: Callable[[], Awaitable[None]] | None = None
 
     def __post_init__(self):
         if (isinstance(self.interval, bool) or
                 not isinstance(self.interval, (float, int)) or
                 not isfinite(self.interval) or self.interval < 0):
             raise ValueError("device cadence must be finite and nonnegative")
+        if self.prepare is not None and not callable(self.prepare):
+            raise ValueError("invalid output preparation hook")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +90,35 @@ class OutputCoordinator:
         async with self._locks[device]:
             if device in self._handover:
                 return
-            frame = self.manager.take_latest(device)
-            if frame is None or not self.manager.frame_is_current(frame):
+            owner = self.manager.owner(device)
+            if owner is None:
+                return
+            before = self.manager.snapshot(owner)
+            if before.phase is not Phase.RUNNING:
                 return
             profile = self.devices[device]
             self._next_due[device] = self.clock() + profile.interval
+            if profile.prepare is not None:
+                try:
+                    await profile.prepare()
+                except Exception:
+                    if self.manager.owner(device) == owner:
+                        current = self.manager.snapshot(owner)
+                        if current.phase is Phase.RUNNING and current.generation == before.generation:
+                            self.status[device] = OutputStatus(
+                                owner, before.generation, "transport_error")
+                    return
+            # Preparation may await network I/O. Revalidate ownership, phase
+            # and handover before consuming the newest frame, never replay
+            # a frame captured before the handshake.
+            if device in self._handover or self.manager.owner(device) != owner:
+                return
+            current = self.manager.snapshot(owner)
+            if current.phase is not Phase.RUNNING or current.generation != before.generation:
+                return
+            frame = self.manager.take_latest(device)
+            if frame is None or not self.manager.frame_is_current(frame):
+                return
             try:
                 await profile.adapter.send_frame(frame)
             except Exception:

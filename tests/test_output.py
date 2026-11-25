@@ -157,3 +157,70 @@ class OutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.phase, Phase.STOPPING)
         self.assertEqual(self.manager.owner("missing"), s.id)
         self.assertNotIn("missing", self.output.status)
+
+    async def test_stale_detach_never_closes_transport(self):
+        calls = []
+        self.output.devices["a"] = DeviceOutput(self.a, 0, release=lambda: calls.append("closed"))
+        s = self.start("show", ["a"], StopPolicy.HOLD)
+        with self.assertRaises(ValueError):
+            await self.output.detach(s.id, s.revision + 1, "a")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.manager.owner("a"), s.id)
+        await self.output.detach(s.id, s.revision, "a")
+        self.assertEqual(calls, ["closed"])
+        self.assertIsNone(self.manager.owner("a"))
+
+    async def test_failed_handover_cleanup_fences_frames_until_retry(self):
+        calls = []
+        def close():
+            calls.append("close")
+            if len(calls) == 1:
+                raise OSError("synthetic cleanup failure")
+        self.output.devices["a"] = DeviceOutput(self.a, 0, release=close)
+        s = self.start("show", ["a", "b"], StopPolicy.HOLD)
+        with self.assertRaises(ValueError):
+            await self.output.detach(s.id, s.revision, "a")
+        self.assertEqual(self.manager.owner("a"), s.id)
+        self.assertEqual(self.output.status["a"].outcome, "cleanup_error")
+        self.tick(s, 101)
+        await self.output.drain()
+        self.assertEqual(self.a.frames, [])
+        self.assertEqual(len(self.b.frames), 1)
+        with self.assertRaises(Conflict):
+            self.start("other", ["a"])
+        await self.output.detach(s.id, s.revision, "a")
+        self.assertIsNone(self.manager.owner("a"))
+        self.assertEqual(calls, ["close", "close"])
+
+    async def test_confirmed_restore_is_not_repeated_after_cleanup_failure(self):
+        calls = []
+        def close():
+            calls.append("close")
+            if len(calls) == 1:
+                raise OSError("synthetic cleanup failure")
+        self.output.devices["a"] = DeviceOutput(self.a, 0, release=close)
+        s = self.start("show", ["a"])
+        pending = await self.output.stop(s.id, s.revision)
+        self.assertEqual(pending.phase, Phase.STOPPING)
+        self.assertEqual(self.output.status["a"].outcome, "cleanup_error")
+        self.assertEqual(self.manager.owner("a"), s.id)
+        stopped = await self.output.stop(s.id, pending.revision)
+        self.assertEqual(stopped.phase, Phase.STOPPED)
+        self.assertEqual(len(self.a.stops), 1)
+        self.assertEqual(calls, ["close", "close"])
+        self.assertIsNone(self.manager.owner("a"))
+
+    async def test_hold_cleanup_failure_keeps_lease(self):
+        calls = []
+        def close():
+            calls.append("close")
+            if len(calls) == 1:
+                raise OSError("synthetic cleanup failure")
+        self.output.devices["a"] = DeviceOutput(self.a, 0, release=close)
+        s = self.start("show", ["a"], StopPolicy.HOLD)
+        pending = await self.output.stop(s.id, s.revision)
+        self.assertEqual(pending.phase, Phase.STOPPING)
+        self.assertEqual(self.manager.owner("a"), s.id)
+        self.assertEqual(self.a.stops, [])
+        self.assertEqual((await self.output.stop(s.id, pending.revision)).phase, Phase.STOPPED)
+        self.assertIsNone(self.manager.owner("a"))

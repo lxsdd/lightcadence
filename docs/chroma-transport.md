@@ -34,3 +34,9 @@ consumed after a fresh ownership/generation/handover check. Failure closes the
 transport without automatic acquisition. Stop and manual detach wait for the
 in-flight handshake and prevent subsequent color frames. This is loopback-only
 software behavior; no physical activation, identity or restore claim.
+
+HOLD stop and coordinated manual detach now close the local UDP socket and
+invalidate the token before lease release. This does not prove remote session
+termination or physical state. Unconfirmed restores retain ownership. A cleanup
+failure retains the lease, fences further frames, and requires explicit retry;
+a confirmed restore is not repeated solely to retry local cleanup.

@@ -11,7 +11,7 @@ from math import isfinite
 from time import monotonic
 from typing import Awaitable, Callable, Protocol
 
-from .sessions import Frame, Phase, SessionManager, SessionSnapshot, StopIntent
+from .sessions import Frame, Phase, SessionManager, SessionSnapshot, StaleRevision, StopIntent
 
 
 class Adapter(Protocol):
@@ -27,6 +27,8 @@ class DeviceOutput:
     adapter: Adapter
     interval: float
     prepare: Callable[[], Awaitable[None]] | None = None
+    # Synchronous, idempotent cleanup; no deferred I/O or device writes.
+    release: Callable[[], None] | None = None
 
     def __post_init__(self):
         if (isinstance(self.interval, bool) or
@@ -35,6 +37,8 @@ class DeviceOutput:
             raise ValueError("device cadence must be finite and nonnegative")
         if self.prepare is not None and not callable(self.prepare):
             raise ValueError("invalid output preparation hook")
+        if self.release is not None and not callable(self.release):
+            raise ValueError("invalid output release hook")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,7 @@ class OutputCoordinator:
         self._workers: dict[str, asyncio.Task] = {}
         self._next_due: dict[str, float] = {}
         self._handover: set[str] = set()
+        self._release_failed: set[str] = set()
         self.status: dict[str, OutputStatus] = {}
 
     def pump(self) -> None:
@@ -71,7 +76,8 @@ class OutputCoordinator:
         for device in self.devices:
             owner = self.manager.owner(device)
             if (owner is None or self.manager.snapshot(owner).phase is not Phase.RUNNING
-                    or device in self._handover or device in self._workers
+                    or device in self._handover or device in self._release_failed
+                    or device in self._workers
                     or self._locks[device].locked()
                     or now < self._next_due.get(device, float("-inf"))):
                 continue
@@ -88,7 +94,7 @@ class OutputCoordinator:
 
     async def _send(self, device):
         async with self._locks[device]:
-            if device in self._handover:
+            if device in self._handover or device in self._release_failed:
                 return
             owner = self.manager.owner(device)
             if owner is None:
@@ -147,6 +153,15 @@ class OutputCoordinator:
         self._handover.add(device)
         try:
             async with self._locks[device]:
+                # Reject stale requests before any irreversible cleanup. No
+                # await between validation, synchronous close and lease release.
+                current = self.manager.snapshot(session_id)
+                if type(revision) is not int or revision != current.revision:
+                    raise StaleRevision("refresh the server snapshot")
+                if self.manager.owner(device) != session_id:
+                    raise ValueError("device is not owned by session")
+                if not self._release_device(device, session_id, current.generation):
+                    raise ValueError("transport cleanup failed; device remains owned")
                 result = self.manager.detach(session_id, revision, device)
                 self.status.pop(device, None)
                 self._next_due.pop(device, None)
@@ -166,10 +181,11 @@ class OutputCoordinator:
         if before.phase is Phase.STOPPED:
             return before
         by_device = {intent.device_id: intent for intent in intents}
-        await asyncio.gather(*(self._stop_device(d, by_device.get(d))
-                               for d in before.devices if d in self.devices))
+        cleanup = await asyncio.gather(*(self._stop_device(
+            session_id, d, by_device.get(d))
+            for d in before.devices if d in self.devices))
         current = self.manager.snapshot(session_id)
-        if current.phase is Phase.STOPPED:
+        if current.phase is Phase.STOPPED or not all(cleanup):
             return current
         try:
             return self.manager.finish_stop(session_id, current.revision)
@@ -177,17 +193,43 @@ class OutputCoordinator:
             # A restore is still pending; do not release its lease.
             return self.manager.snapshot(session_id)
 
-    async def _stop_device(self, device, intent):
+    def _release_device(self, device, session_id, generation):
+        """Close only the current owner's transport; a failure blocks frames."""
+        hook = self.devices[device].release
+        try:
+            if hook is not None:
+                hook()
+        except Exception:
+            self._release_failed.add(device)
+            self.status[device] = OutputStatus(session_id, generation, "cleanup_error")
+            return False
+        self._release_failed.discard(device)
+        self._next_due.pop(device, None)
+        return True
+
+    async def _stop_device(self, session_id, device, intent):
         async with self._locks[device]:
-            if intent is None or not self.manager.stop_intent_is_current(intent):
-                return
-            try:
-                confirmed = await self.devices[device].adapter.apply_stop(intent)
-            except Exception:
-                confirmed = False
-            if self.manager.stop_intent_is_current(intent):
+            if self.manager.owner(device) != session_id:
+                return True
+            current = self.manager.snapshot(session_id)
+            if current.phase is not Phase.STOPPING:
+                return True
+            if intent is not None and self.manager.stop_intent_is_current(intent):
+                try:
+                    confirmed = await self.devices[device].adapter.apply_stop(intent)
+                except Exception:
+                    confirmed = False
+                if not self.manager.stop_intent_is_current(intent):
+                    # A concurrent operation may have already resolved the
+                    # intent; never clean up another session's transport.
+                    return False
                 success = confirmed is True
                 self.manager.acknowledge_stop(intent, success=success)
                 self.status[device] = OutputStatus(
                     intent.session_id, intent.generation,
                     "stop_confirmed" if success else "stop_unconfirmed")
+                if not success:
+                    return False
+            # HOLD or already-confirmed restore. If cleanup fails, retain the
+            # lease and retry cleanup only, not the confirmed restore write.
+            return self._release_device(device, session_id, current.generation)

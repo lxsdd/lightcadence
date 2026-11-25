@@ -221,7 +221,7 @@ class ChromaV2Adapter:
     def output_profile(self, interval):
         """Bind the maintenance hook to the original output coordinator."""
         from .output import DeviceOutput
-        return DeviceOutput(self, interval, prepare=self.maintain)
+        return DeviceOutput(self, interval, prepare=self.maintain, release=self.close)
 
     async def send_frame(self, frame: Frame):
         if frame.device_id != self.device_id:

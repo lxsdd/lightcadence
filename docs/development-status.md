@@ -28,3 +28,5 @@ with `cd frontend && npm install && npm run build` before copying the integratio
 No built bundle is committed. Browser tests use synthetic HA responses; native
 HA test separately checks actual panel registration and asset serving. Physical
 output remains disabled. Exact dependency lock and full security review pending.
+
+- Coordinated transport cleanup: close Chroma socket/token before HOLD or manual lease release; retain lease and fence frames on cleanup failure; retry cleanup without repeating an already confirmed restore. Loopback/synthetic regression coverage; physical output and real restore remain disabled.

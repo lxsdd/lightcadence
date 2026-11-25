@@ -175,6 +175,9 @@ class ChromaTests(unittest.IsolatedAsyncioTestCase):
         self.reply(addr, {"id": keep["id"], "token": TOKEN})
         await output.drain()
         self.assertEqual((await stop).phase, Phase.STOPPED)
+        self.assertFalse(self.adapter.ready)
+        with self.assertRaises(ChromaError):
+            await self.adapter.send_frame(self.frame())
         with self.assertRaises(TimeoutError):
             async with asyncio.timeout(.03):
                 await asyncio.get_running_loop().sock_recvfrom(self.peer, 4096)
@@ -193,6 +196,9 @@ class ChromaTests(unittest.IsolatedAsyncioTestCase):
         await output.drain()
         await handover
         self.assertIsNone(manager.owner("lamp"))
+        self.assertFalse(self.adapter.ready)
+        with self.assertRaises(ChromaError):
+            await self.adapter.send_frame(self.frame())
         with self.assertRaises(TimeoutError):
             async with asyncio.timeout(.03):
                 await asyncio.get_running_loop().sock_recvfrom(self.peer, 4096)

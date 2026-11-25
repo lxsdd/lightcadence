@@ -120,4 +120,45 @@ try {
     assert.equal(calls[3].payload.device_id,"a");
     await page.close();
   });
+  await test("responsive HA content surface resizes without viewport changes",async()=>{
+    const page=await browser.newPage({viewport:{width:1920,height:1400}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      document.body.style.margin="0";
+      const el=document.querySelector("lightcadence-panel");
+      const parent=document.createElement("div");
+      parent.id="ha-content";
+      document.body.append(parent);parent.append(el);
+      const lights=Array.from({length:3},(_,i)=>({id:String(i),name:"Long lamp "+("identifier".repeat(8))+i,entity_id:"light.synthetic_"+i,available:true,area_id:null}));
+      const snapshot={schema_version:1,instance_id:"layout-test",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>msg.type==="lightcadence/catalog"?{schema_version:1,entries:["entry"],physical_output_enabled:false,lights}:snapshot};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    for(const [width,height] of [[1600,1200],[1100,950],[800,850],[680,900],[390,844],[320,640],[900,420],[620,420],[1600,1200]]){
+      const rect=await page.evaluate(async ([w,h])=>{
+        const parent=document.querySelector("#ha-content");
+        parent.style.width=w+"px";parent.style.height=h+"px";
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        const el=parent.firstElementChild,root=el.shadowRoot;
+        const box=q=>{const x=root.querySelector(q).getBoundingClientRect();return {x:x.x,y:x.y,w:x.width,h:x.height,b:x.bottom,r:x.right};};
+        return {host:el.getBoundingClientRect().toJSON(),main:box("main"),left:box("section[aria-labelledby=setup]"),right:box(".right-stack"),workspace:box(".workspace"),scrollWidth:root.querySelector("main").scrollWidth,clientWidth:root.querySelector("main").clientWidth,innerScroll:[...root.querySelectorAll("main,.workspace,section,.right-stack")].some(x=>["auto","scroll","hidden","clip"].includes(getComputedStyle(x).overflowY))};
+      },[width,height]);
+      assert.ok(Math.abs(rect.host.width-width)<1,JSON.stringify(rect));
+      assert.ok(Math.abs(rect.main.w-width)<1,JSON.stringify(rect));
+      assert.ok(rect.main.h>=height-1,JSON.stringify(rect));
+      assert.ok(rect.scrollWidth<=rect.clientWidth+1,JSON.stringify(rect));
+      assert.equal(rect.innerScroll,false);
+      if(width>760){
+        assert.ok(Math.abs(rect.left.y-rect.right.y)<1,JSON.stringify(rect));
+        assert.ok(Math.abs(rect.left.b-rect.right.b)<1,JSON.stringify(rect));
+        assert.ok(rect.left.r<rect.right.x,JSON.stringify(rect));
+      }else{
+        assert.ok(rect.left.b<rect.right.y,JSON.stringify(rect));
+        assert.ok(Math.abs(rect.left.x-rect.right.x)<1,JSON.stringify(rect));
+        assert.ok(Math.abs(rect.left.w-rect.right.w)<1,JSON.stringify(rect));
+      }
+    }
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

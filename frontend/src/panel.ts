@@ -1,4 +1,5 @@
-import {LitElement, css, html, nothing} from "lit";
+import {LitElement, html, nothing} from "lit";
+import {workspaceStyles} from "./workspace-styles";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
@@ -166,7 +167,7 @@ class LightCadencePanel extends LitElement {
     const formLocked=this.busy||!!this.pendingStart;
     return html`
       <main>
-        <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge">${this.online?"Connected":"Disconnected"}</span></header>
+        <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
         <p class="notice">${physical?"Hardware candidate — real lamp commands are enabled for enrolled devices only. Not hardware-qualified. Ordinary HA/Google Home actions are not coordinated. Colours are targets, not optical feedback.":"Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback."}</p>
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
         <div class="workspace">
@@ -181,34 +182,22 @@ class LightCadencePanel extends LitElement {
             <button class="primary" ?disabled=${!this.online||this.busy||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>
-          <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
-          ${active.length?active.map(s=>html`<article><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>
+          <div class="right-stack"><section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
+          ${active.length?active.map(s=>html`<article data-phase=${s.phase}><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>
             <div class="targets">${s.devices.map(id=>html`<div class="target"><span class="swatch" style=${"background:"+color(this.snapshot?.targets[id]?.target)}></span><span>${this.name(id)}</span><button title="Remove this lamp from this preview only; other sessions are unaffected" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"detach",session_id:s.id,revision:s.revision,device_id:id})}>Detach</button></div>`)}</div>
             <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}
           </section>
-        </div>
         ${physical?html`<section class="manual" aria-labelledby="manual"><h2 id="manual">Manual lamp control</h2><p>Take the selected lamp out of any running show before changing it. Other lamps continue. No automatic retry after an uncertain result.</p>
           <label>Manual lamp <select aria-label="Manual lamp" .value=${this.manualDevice} ?disabled=${this.busy||!!this.pendingManual} @change=${(e:Event)=>this.manualDevice=(e.target as HTMLSelectElement).value}><option value="">Select a lamp</option>${this.catalog?.lights.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
           <label>Manual colour <input aria-label="Manual colour" type="color" .value=${this.manualColor} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualColor=(e.target as HTMLInputElement).value}></label>
           <label>Manual brightness (%) <input aria-label="Manual brightness (%)" type="number" min="1" max="100" step="1" .value=${String(this.manualBrightness)} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualBrightness=(e.target as HTMLInputElement).valueAsNumber}></label>
           ${this.pendingManual?html`<button ?disabled=${!this.online||this.busy} @click=${()=>this.manual(false)}>Check same manual request</button><button ?disabled=${this.busy} @click=${()=>{this.pendingManual=undefined;this.status="Manual outcome may be uncertain. Inspect the device before a new action.";}}>Clear pending request</button>`:html`<button ?disabled=${!this.online||this.busy||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(false)}>Apply colour and turn on</button> <button ?disabled=${!this.online||this.busy||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(true)}>Turn off lamp</button>`}
         </section>`:nothing}
+        </div>
+        </div>
       </main>`;
   }
-  static styles=css`
-    :host{display:block;color:var(--primary-text-color,#eef1f5);background:var(--primary-background-color,#141923);min-height:100%;font-family:inherit}
-    *{box-sizing:border-box} main{max-width:1300px;margin:auto;padding:clamp(12px,3vw,32px);overflow-wrap:anywhere}
-    h1{font-size:clamp(24px,4vw,34px);margin:0} h2{font-size:20px} h3{font-size:16px;margin:16px 0 8px} p{margin:8px 0} header,.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-    .badge,.notice{border:1px solid var(--divider-color,#687080);border-radius:8px;padding:10px}.notice{margin:16px 0}
-    .manual{margin-top:16px} .workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:16px;margin-top:16px}
-    section,article{background:var(--card-background-color,#202735);border:1px solid var(--divider-color,#596273);border-radius:12px;padding:16px;min-width:0} article+article{margin-top:12px}
-    label{display:block;margin:10px 0} input:not([type=checkbox]),select{display:block;width:100%;min-height:44px;color:inherit;background:var(--secondary-background-color,#303948);border:1px solid var(--divider-color,#657080);border-radius:6px;padding:8px}
-    input[type=checkbox]{width:20px;height:20px;flex:none} .lamp,.target{display:flex;align-items:center;gap:12px;min-height:44px;padding:6px 0} small{display:block;color:var(--secondary-text-color,#bec5cf)}
-    button{min-height:44px;min-width:44px;padding:8px 14px;border:1px solid var(--divider-color,#657080);background:var(--secondary-background-color,#303948);color:inherit;border-radius:8px;cursor:pointer;font:inherit}
-    button.primary{margin-top:12px;background:var(--primary-color,#237db8);color:var(--text-primary-color,white)} button:disabled{opacity:.5;cursor:not-allowed} button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--primary-color,#48a9e8);outline-offset:2px}
-    .target span:nth-child(2){flex:1;min-width:0}.swatch{width:32px;height:32px;flex:none;border:1px solid var(--divider-color,#657080);border-radius:50%}
-    @media(max-width:700px){.workspace{grid-template-columns:minmax(0,1fr)} section{padding:12px}}
-  `;
+  static styles=workspaceStyles;
 }
 customElements.define("lightcadence-panel",LightCadencePanel);

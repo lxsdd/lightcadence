@@ -8,6 +8,7 @@ from .effects import Effect, EffectKind, LightTarget, linear_channel
 from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
 from .audio import AudioHub
+from .library import ProjectLibrary
 
 
 def fields(value, required, optional=()):
@@ -64,6 +65,7 @@ class PreviewRuntime:
         self.clock = clock
         self.instance_id = str(uuid4())
         self.manager = SessionManager(clock)
+        self.library = ProjectLibrary()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
         self.targets = {}
@@ -90,9 +92,13 @@ class PreviewRuntime:
             "sessions": [asdict(s) for s in self.manager.snapshots()],
             "targets": self.targets,
             "audio_sources": self.audio.snapshot(),
+            "library": self.library.snapshot(),
         }
 
     def command(self, body):
+        if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):
+            self.library.command(body)
+            return self.state()
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",
                                "session_id", "revision", "device_id"))
         op = body["op"]
@@ -122,7 +128,7 @@ class PreviewRuntime:
             raise ValueError("unknown audio source")
 
     async def close(self):
-        """Preview owns no device resources."""
+        self.library.close()
 
     async def run(self):
         # Render cadence is a target, not a cap on physical-device performance.
@@ -155,6 +161,7 @@ class PhysicalRuntime(PreviewRuntime):
         profiles = tuple(profiles)
         self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock, journal=journal)
         self.manager = self.physical.manager
+        self.library = ProjectLibrary()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
         self.targets = {}
@@ -194,6 +201,9 @@ class PhysicalRuntime(PreviewRuntime):
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
+        if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):
+            self.library.command(body)
+            return self.state()
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",
                                "session_id", "revision", "device_id", "stop_policy", "state", "record_id", "decision"))
         op = body["op"]
@@ -252,4 +262,7 @@ class PhysicalRuntime(PreviewRuntime):
         # The render task and HTTP handlers must have ended first. No blind
         # restore on shutdown: durable entries remain for explicit recovery.
         self._closing = True
-        await self.physical.close()
+        try:
+            await self.physical.close()
+        finally:
+            self.library.close()

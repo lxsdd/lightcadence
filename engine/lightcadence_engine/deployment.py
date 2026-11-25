@@ -7,10 +7,25 @@ from .chroma import _unique_pairs
 from .enrollment import ChromaProfile
 from .runtime import PreviewRuntime, fields
 from .recovery import RecoveryJournal
+from .library import ProjectLibrary
 from .yeelight_lan import LanBinding, compose_lan_candidate
 
 
 def configured_runtime(env):
+    runtime = _configured_runtime(env)
+    directory = env.get("LIGHTCADENCE_LIBRARY_DIR")
+    if directory is not None:
+        try:
+            runtime.library = ProjectLibrary(directory)
+        except BaseException:
+            journal = getattr(getattr(runtime, "physical", None), "journal", None)
+            if journal is not None:
+                journal.close()
+            raise ValueError("invalid owner-local library directory") from None
+    return runtime
+
+
+def _configured_runtime(env):
     mode = env.get("LIGHTCADENCE_MODE", "preview")
     path = env.get("LIGHTCADENCE_DEVICE_FILE")
     journal_dir = env.get("LIGHTCADENCE_JOURNAL_DIR")

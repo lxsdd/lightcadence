@@ -216,4 +216,37 @@ try {
     assert.equal(await page.evaluate(()=>window.audioCalls.length),1);
     await page.close();
   });
+  await test("library explicit save and load in original mobile panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.libraryCalls=[];
+      const s={schema_version:1,instance_id:"library",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:0,zones:[],scenes:[],persistent:true,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.libraryCalls.push(structuredClone(p));
+          if(p.op==="library_save"){s.library[p.kind].push({...p.value,id:p.kind==="zones"?"zone1":"scene1",revision:1});s.library.revision++;}
+          if(p.op==="start")s.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];
+        }
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("textbox",{name:"Zone name"}).fill("Test zone");
+    await page.getByRole("checkbox").check();
+    await page.getByRole("button",{name:"Save new zone"}).click();
+    await page.getByLabel("Saved zone",{exact:true}).selectOption("zone1");
+    await page.getByLabel("Scene name",{exact:true}).fill("Test scene");
+    await page.getByLabel("Effect",{exact:true}).selectOption("scanner");
+    await page.getByRole("button",{name:"Save new scene"}).click();
+    await page.getByLabel("Saved scene",{exact:true}).selectOption("scene1");
+    assert.equal(await page.getByLabel("Effect",{exact:true}).inputValue(),"scanner");
+    assert.equal(await page.evaluate(()=>window.libraryCalls.length),2);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Test zone",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.libraryCalls.map(x=>x.op)),["library_save","library_save","start"]);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

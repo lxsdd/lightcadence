@@ -65,9 +65,13 @@ def validate_preview_selection(hass, payload):
     Registry selection is not physical access authorization. Output is preview
     only; no HA service calls, registry mutations, or device network I/O.
     """
-    if payload.get("op") != "start":
+    if payload.get("op") == "library_save" and payload.get("kind") == "zones":
+        value = payload.get("value")
+        devices = value.get("devices") if isinstance(value, dict) else None
+    elif payload.get("op") == "start":
+        devices = payload.get("devices")
+    else:
         return
-    devices = payload.get("devices")
     allowed = {light["id"] for light in light_catalog(hass)}
     if (not isinstance(devices, list) or not devices
             or not all(isinstance(device, str) and device in allowed for device in devices)

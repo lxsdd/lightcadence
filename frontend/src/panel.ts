@@ -8,11 +8,16 @@ type Session = {id: string; zone_id: string; phase: string; revision: number; de
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number};
-type Snapshot = {audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
+type PresetEffect={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
+type Zone={id:string;name:string;revision:number;devices:string[]};
+type Scene={id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
+type Library={revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
+type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes";id:string|null;value:Record<string,unknown>|null};
+type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
-type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number; audio_source?:string}};
+type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
-type Command = Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type Command = LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum"};
@@ -41,7 +46,7 @@ function color(t: RGB | undefined): string {
 class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
-    zone:{state:true}, effect:{state:true}, audioSource:{state:true}, period:{state:true}, brightness:{state:true},
+    zone:{state:true}, effect:{state:true}, audioSource:{state:true}, selectedZone:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
     busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
     manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
   };
@@ -52,6 +57,12 @@ class LightCadencePanel extends LitElement {
   declare zone: string;
   declare effect: string;
   declare audioSource:string;
+  declare selectedZone:string;
+  declare selectedScene:string;
+  declare sceneName:string;
+  private effectColor=[1,0,0];
+  private effectWidth=.25;
+  private loadedLibraryRevision=-1;
   declare period: number;
   declare brightness: number;
   declare busy: boolean;
@@ -68,7 +79,7 @@ class LightCadencePanel extends LitElement {
   private entry?: string;
   private refreshing = false;
   constructor() {
-    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.audioSource=""; this.period=4;
+    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.audioSource=""; this.selectedZone="";this.selectedScene="";this.sceneName=""; this.period=4;
     this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
@@ -88,6 +99,7 @@ class LightCadencePanel extends LitElement {
     if(s.schema_version!==1 || s.output_mode!==(physical?"physical_candidate":"preview") || s.physical_output_enabled!==physical || (physical && (s.hardware_qualified!==false || !Array.isArray(s.enrolled_devices)))) throw new Error("incompatible engine API");
     if(this.snapshot && this.snapshot.instance_id!==s.instance_id) {this.pendingStart=undefined;this.pendingManual=undefined;}
     this.snapshot=s;
+    if(s.library){if(!s.library.zones.some(z=>z.id===this.selectedZone))this.selectedZone="";if(!s.library.scenes.some(x=>x.id===this.selectedScene))this.selectedScene="";}
   }
   private async refresh(full=false) {
     if(!this.hass || !this.isConnected || this.busy || this.refreshing) return;
@@ -121,10 +133,11 @@ class LightCadencePanel extends LitElement {
       const state=await this.hass.callWS<Snapshot>({type:physical?"lightcadence/physical":"lightcadence/preview",entry_id:this.entry,payload:command});
       if(epoch!==this.epoch) return;
       this.accept(state);
+      if(payload.op==="library_save"||payload.op==="library_delete"){this.selectedZone="";this.selectedScene="";this.loadedLibraryRevision=-1;}
       if(payload.op==="start") this.pendingStart=undefined;
       if(manual) this.pendingManual=undefined;
       if(payload.op==="start") {this.chosen=[]; this.zone="";}
-      this.status=payload.op==="recover"?(state.manual_result==="confirmed"?"Recovery resolved after state readback":"Recovery unconfirmed — inspect the lamp before making a new decision"):manual?(state.manual_result==="confirmed"?"Manual state readback confirmed (not optical confirmation)":"Manual outcome unconfirmed — inspect device before another command"):state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
+      this.status=payload.op==="library_save"||payload.op==="library_delete"?"Library updated — no lamp commands sent":payload.op==="recover"?(state.manual_result==="confirmed"?"Recovery resolved after state readback":"Recovery unconfirmed — inspect the lamp before making a new decision"):manual?(state.manual_result==="confirmed"?"Manual state readback confirmed (not optical confirmation)":"Manual outcome unconfirmed — inspect device before another command"):state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
     } catch(error) {
       if(epoch===this.epoch) {
         this.status=explain(error);
@@ -142,7 +155,7 @@ class LightCadencePanel extends LitElement {
     if(this.pendingStart) {void this.send(this.pendingStart); return;}
     if(!this.zone.trim() || !this.chosen.length || !Number.isFinite(this.period) || this.period<=0 || !Number.isFinite(this.brightness) || this.brightness<0 || this.brightness>1) return;
     const payload:Start={op:"start",request_id:requestId(),zone_id:this.zone.trim(),devices:[...this.chosen],
-      effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness}};
+      effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth}};
     if(this.effect==="audio_spectrum") {
       if(!this.snapshot?.audio_sources?.some(s=>s.id===this.audioSource)) return;
       payload.effect.audio_source=this.audioSource;
@@ -150,6 +163,30 @@ class LightCadencePanel extends LitElement {
     if(this.catalog?.physical_output_enabled) {payload.instance_id=this.snapshot?.instance_id;payload.stop_policy=this.stopPolicy;}
     this.pendingStart=payload;
     void this.send(payload);
+  }
+  private loadZone(id:string) {
+    const z=this.snapshot?.library?.zones.find(x=>x.id===id);
+    if(!z) return;
+    if(!z.devices.every(d=>this.catalog?.lights.some(l=>l.id===d))) {this.status="Zone contains missing registry devices";return;}
+    this.loadedLibraryRevision=this.snapshot?.library?.revision??-1;this.selectedZone=z.id;this.zone=z.name;this.chosen=[...z.devices];this.selectedScene="";
+  }
+  private loadScene(id:string) {
+    const s=this.snapshot?.library?.scenes.find(x=>x.id===id);
+    const z=this.snapshot?.library?.zones.find(x=>x.id===s?.zone_id);
+    if(!s||!z||!z.devices.every(d=>this.catalog?.lights.some(l=>l.id===d))) {this.status="Scene contains missing registry devices";return;}
+    this.loadZone(z.id);this.selectedScene=s.id;this.sceneName=s.name;this.effect=s.effect.kind;
+    this.effectColor=[...s.effect.color];this.effectWidth=s.effect.width;this.period=s.effect.period_seconds;this.brightness=s.effect.brightness;this.stopPolicy=s.stop_policy;this.audioSource="";
+  }
+  private libraryWrite(kind:"zones"|"scenes",remove=false,create=false) {
+    const state=this.snapshot, lib=state?.library;
+    if(!state||!lib||lib.fault||this.pendingStart||this.pendingManual) return;
+    const id=create?null:(kind==="zones"?this.selectedZone:this.selectedScene)||null;
+    if(remove&&!id)return;
+    if(kind==="scenes"&&!remove&&this.loadedLibraryRevision!==lib.revision){this.status="Library changed — reload the selected zone before saving";return;}
+    if(id&&this.loadedLibraryRevision!==lib.revision){this.status="Library changed — reload the selected item before editing";return;}
+    const value=remove?null:kind==="zones"?{name:this.zone,devices:[...this.chosen]}:
+      {name:this.sceneName,zone_id:this.selectedZone,effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth},stop_policy:this.stopPolicy};
+    void this.send({op:remove?"library_delete":"library_save",instance_id:state.instance_id,revision:id?this.loadedLibraryRevision:lib.revision,kind,id,value});
   }
   private manual(off: boolean) {
     if(this.pendingManual) {void this.send(this.pendingManual);return;}
@@ -176,6 +213,10 @@ class LightCadencePanel extends LitElement {
     const locked=new Set(active.flatMap(s=>s.devices));
     const formLocked=this.busy||!!this.pendingStart||fault;
     const sources=this.snapshot?.audio_sources??[];
+    const lib=this.snapshot?.library;
+    const libraryLocked=formLocked||!this.online||!!this.pendingManual||!!lib?.fault;
+    const validZone=!!this.zone.trim()&&this.chosen.length>0;
+    const validScene=!!this.sceneName.trim()&&!!lib?.zones.some(z=>z.id===this.selectedZone)&&Number.isFinite(this.period)&&this.period>0&&Number.isFinite(this.brightness)&&this.brightness>=0&&this.brightness<=1;
     return html`
       <main>
         <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
@@ -193,7 +234,20 @@ class LightCadencePanel extends LitElement {
             <button class="primary" ?disabled=${!this.online||this.busy||fault||this.chosen.some(id=>blocked.has(id))||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)||(this.effect==="audio_spectrum"&&!sources.some(s=>s.id===this.audioSource))))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>
-          <div class="right-stack"><section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
+          <div class="right-stack">
+          ${lib?html`<section aria-labelledby="library"><h2 id="library">Zones and scenes</h2>
+            <p>${lib.fault?"Storage fault — editing disabled":lib.persistent?"Stored locally on engine":"Temporary library — configure local storage for persistence"}. Loading only fills the show controls.</p>
+            <label>Saved zone <select aria-label="Saved zone" .value=${this.selectedZone} ?disabled=${libraryLocked} @change=${(e:Event)=>{const id=(e.target as HTMLSelectElement).value;if(id)this.loadZone(id);else this.selectedZone="";}}><option value="">Select zone</option>${lib.zones.map(z=>html`<option value=${z.id}>${z.name} · ${z.devices.length} lamps</option>`)}</select></label>
+            <button ?disabled=${libraryLocked||!validZone} @click=${()=>this.libraryWrite("zones",false,true)}>Save new zone</button>
+            <button ?disabled=${libraryLocked||!validZone||!this.selectedZone} @click=${()=>this.libraryWrite("zones")}>Update zone</button>
+            <button ?disabled=${libraryLocked||!this.selectedZone||lib.scenes.some(s=>s.zone_id===this.selectedZone)} @click=${()=>this.libraryWrite("zones",true)}>Delete zone</button>
+            <label>Saved scene <select aria-label="Saved scene" .value=${this.selectedScene} ?disabled=${libraryLocked} @change=${(e:Event)=>{const id=(e.target as HTMLSelectElement).value;if(id)this.loadScene(id);else this.selectedScene="";}}><option value="">Select scene</option>${lib.scenes.map(s=>html`<option value=${s.id}>${s.name}</option>`)}</select></label>
+            <label>Scene name <input aria-label="Scene name" .value=${this.sceneName} ?disabled=${libraryLocked} @input=${(e:Event)=>this.sceneName=(e.target as HTMLInputElement).value}></label>
+            <button ?disabled=${libraryLocked||!validScene} @click=${()=>this.libraryWrite("scenes",false,true)}>Save new scene</button>
+            <button ?disabled=${libraryLocked||!validScene||!this.selectedScene} @click=${()=>this.libraryWrite("scenes")}>Update scene</button>
+            <button ?disabled=${libraryLocked||!this.selectedScene} @click=${()=>this.libraryWrite("scenes",true)}>Delete scene</button>
+          </section>`:nothing}
+          <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
           ${active.length?active.map(s=>html`<article data-phase=${s.phase}><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>${s.effect.audio_source?html`<p>Audio: ${sources.find(a=>a.id===s.effect.audio_source)?.name??"Source disconnected"} · ${sources.find(a=>a.id===s.effect.audio_source)?.status??"ambient"}</p>`:nothing}
             <div class="targets">${s.devices.map(id=>html`<div class="target"><span class="swatch" style=${"background:"+color(this.snapshot?.targets[id]?.target)}></span><span>${this.name(id)}</span><button title="Remove this lamp from this preview only; other sessions are unaffected" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"detach",session_id:s.id,revision:s.revision,device_id:id})}>Detach</button></div>`)}</div>
             <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>

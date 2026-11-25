@@ -204,6 +204,25 @@ class PhysicalSessions:
         finally:
             self._reserved.discard(device_id)
 
+    async def manual_set(self, device_id, state):
+        """One cooperating manual write, confirmed by independent observation."""
+        if not isinstance(state, DeviceState):
+            raise SessionError("invalid manual state")
+        async with self.manual_handover(device_id):
+            adapter = self._adapters[device_id]
+            await adapter.observe()
+            if await adapter.state_port.write(adapter.profile, state) is not True:
+                return "unconfirmed"
+            return "confirmed" if await adapter.observe() == state else "unconfirmed"
+
+    async def close(self):
+        """Called after command admission and rendering have stopped."""
+        try:
+            await self.output.drain()
+        finally:
+            for adapter in self._adapters.values():
+                adapter.transport.close()
+
     def tick(self):
         for session in self.manager.snapshots():
             self.manager.render(session.id)

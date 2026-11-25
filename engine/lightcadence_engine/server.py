@@ -8,7 +8,7 @@ import re
 
 from aiohttp import web
 
-from .runtime import PreviewRuntime
+from .runtime import PhysicalRuntime, PreviewRuntime
 from .sessions import Conflict, StaleRevision
 
 RUNTIME = web.AppKey("runtime", PreviewRuntime)
@@ -26,6 +26,9 @@ def create_app(token, runtime=None):
     if not valid_token(token):
         raise ValueError("configure a local random token of at least 32 URL-safe characters")
     runtime = runtime if runtime is not None else PreviewRuntime()
+    if not isinstance(runtime, PreviewRuntime):
+        raise ValueError("invalid runtime")
+    physical = isinstance(runtime, PhysicalRuntime)
     expected = ("Bearer " + token).encode("ascii")
 
     @web.middleware
@@ -52,6 +55,8 @@ def create_app(token, runtime=None):
                 await task
             except asyncio.CancelledError:
                 pass
+            finally:
+                await runtime.close()
 
     async def state(_request):
         return web.json_response(runtime.state())
@@ -61,18 +66,22 @@ def create_app(token, runtime=None):
             return error("invalid_content_type", 415)
         try:
             payload = await request.json()
-            result = runtime.command(payload)
+            result = await runtime.command(payload) if physical else runtime.command(payload)
         except Conflict as exc:
             return error("device_conflict", 409, owners=exc.owners)
         except StaleRevision:
             return error("stale_revision", 409)
+        except OSError:
+            return error("transport_unavailable", 503)
         except (ValueError, TypeError, OverflowError):
             return error("invalid_request", 400)
         return web.json_response(result)
 
     app.cleanup_ctx.append(lifecycle)
     app.router.add_get("/v1/state", state)
-    app.router.add_post("/v1/preview", command)
+    # Separate route is registered only by explicit in-process composition.
+    # The installed CLI constructs the preview runtime and cannot switch modes.
+    app.router.add_post("/v1/physical" if physical else "/v1/preview", command)
     return app
 
 

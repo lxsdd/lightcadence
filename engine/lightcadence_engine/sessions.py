@@ -228,6 +228,10 @@ class SessionManager:
             self._mailboxes[device] = frame
         return len(session.positions)
 
+    def peek_latest(self, device_id: str) -> Frame | None:
+        """Read render intent without consuming the output worker's mailbox."""
+        return self._mailboxes.get(device_id)
+
     def take_latest(self, device_id: str) -> Frame | None:
         return self._mailboxes.pop(device_id, None)
 

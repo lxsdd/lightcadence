@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to LightCadence",
+        "description": "Connect to the local engine. This development version supports preview only.",
+        "data": {
+          "port": "Local engine port",
+          "token": "Local engine token"
+        }
+      }
+    },
+    "error": {
+      "invalid_config": "Invalid port or token format",
+      "invalid_auth": "Authentication failed",
+      "cannot_connect": "Cannot connect to the compatible local engine"
+    },
+    "abort": {
+      "already_configured": "The local engine is already configured"
+    }
+  }
+}

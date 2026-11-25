@@ -106,7 +106,7 @@ try {
     await page.getByRole("heading",{name:"Test zone"}).waitFor();
     await page.getByRole("button",{name:"Stop show"}).click();
     await page.getByText("No active shows.",{exact:false}).waitFor();
-    await page.getByLabel("Manual lamp").selectOption("a");
+    await page.getByLabel("Manual lamp",{exact:true}).selectOption("a");
     await page.getByLabel("Manual colour").fill("#4080ff");
     await page.getByLabel("Manual brightness (%)").fill("71");
     await page.getByRole("button",{name:"Apply colour and turn on"}).click();

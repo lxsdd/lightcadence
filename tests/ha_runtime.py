@@ -97,47 +97,47 @@ async def main():
                 hass.states.async_set(b.entity_id, "off", {"friendly_name": "Synthetic B"})
                 async with ClientSession() as session:
                     async with await auth(session, admin) as ws:
-                        panels = await command(ws, 100, "get_panels")
+                        panels = await command(ws, 1, "get_panels")
                         panel = panels["result"]["lightcadence"]
                         assert panel["config"]["_panel_custom"]["name"] == "lightcadence-panel"
                         assert panel["config"]["_panel_custom"]["module_url"] == "/lightcadence_assets/panel.js"
                         async with session.get(f"http://127.0.0.1:{HA_PORT}/lightcadence_assets/panel.js") as asset:
                             assert asset.status == 200
                             assert "lightcadence-panel" in await asset.text()
-                        catalog = await command(ws, 1, "lightcadence/catalog")
+                        catalog = await command(ws, 2, "lightcadence/catalog")
                         assert catalog["success"], catalog
                         assert catalog["result"]["entries"] == [entry_id]
                         assert {x["id"] for x in catalog["result"]["lights"]} == {a.id, b.id}
                         assert not catalog["result"]["physical_output_enabled"]
                         renamed = registry.async_update_entity(a.entity_id, new_entity_id="light.synthetic_renamed")
                         assert renamed.id == a.id
-                        catalog = await command(ws, 2, "lightcadence/catalog")
+                        catalog = await command(ws, 3, "lightcadence/catalog")
                         assert any(x["id"] == a.id and x["entity_id"] == renamed.entity_id
                                    for x in catalog["result"]["lights"])
                         payload = {"op": "start", "request_id": "ha-test", "zone_id": "test",
                                    "devices": [a.id, b.id], "effect": {"kind": "rainbow"}}
                         for bad in ("unknown", disabled.id, hidden.id, sensor.id):
-                            denied = await command(ws, 3 + ("unknown", disabled.id, hidden.id, sensor.id).index(bad),
+                            denied = await command(ws, 4 + ("unknown", disabled.id, hidden.id, sensor.id).index(bad),
                                 "lightcadence/preview", entry_id=entry_id,
                                 payload={**payload, "devices": [a.id, bad]})
                             assert not denied["success"] and denied["error"]["code"] == "invalid_selection"
-                        empty = await command(ws, 7, "lightcadence/state", entry_id=entry_id)
+                        empty = await command(ws, 8, "lightcadence/state", entry_id=entry_id)
                         assert empty["result"]["sessions"] == []
-                        started = await command(ws, 8, "lightcadence/preview", entry_id=entry_id, payload=payload)
+                        started = await command(ws, 9, "lightcadence/preview", entry_id=entry_id, payload=payload)
                         assert started["success"], started
                         snapshot = started["result"]["sessions"][0]
                         assert set(snapshot["devices"]) == {a.id, b.id}
                         assert started["result"]["physical_output_enabled"] is False
                     async with await auth(session, ordinary) as ws:
-                        panels = await command(ws, 100, "get_panels")
+                        panels = await command(ws, 1, "get_panels")
                         assert "lightcadence" not in panels["result"]
                         for i, kind, args in [
-                            (1, "lightcadence/catalog", {}),
-                            (2, "lightcadence/state", {"entry_id": entry_id}),
-                            (3, "lightcadence/preview", {"entry_id": entry_id, "payload": payload}),
+                            (2, "lightcadence/catalog", {}),
+                            (3, "lightcadence/state", {"entry_id": entry_id}),
+                            (4, "lightcadence/preview", {"entry_id": entry_id, "payload": payload}),
                         ]:
                             denied = await command(ws, i, kind, **args)
-                            assert not denied["success"], denied
+                            assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
                     async with await auth(session, admin) as ws:
                         reconnect = await command(ws, 1, "lightcadence/state", entry_id=entry_id)
                         assert reconnect["result"]["sessions"] == [snapshot]

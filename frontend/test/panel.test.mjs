@@ -52,18 +52,26 @@ try {
       await page.getByRole("button",{name:"Detach"}).first().click();
       await page.waitForFunction(()=>document.querySelector("lightcadence-panel").shadowRoot.querySelectorAll(".swatch").length===1);
       assert.equal(await page.evaluate(()=>window.fixture.calls.filter(x=>x.payload?.op==="detach").at(-1).payload.revision),1);
+      // Use the released lamp in a different, independent zone.
+      await page.getByRole("textbox",{name:"Zone name"}).fill("Zone B");
+      await page.getByRole("checkbox").first().check();
+      await page.getByRole("button",{name:"Start preview"}).click();
+      await page.getByRole("heading",{name:"Zone B"}).waitFor();
+      assert.equal(await page.getByRole("button",{name:"Stop preview"}).count(),2);
       // Replace the view with another client; it must not issue a second start.
       await page.evaluate(()=>{const el=document.createElement("lightcadence-panel");el.hass=window.syntheticHA;document.querySelector("lightcadence-panel").replaceWith(el);});
       await page.getByRole("heading",{name:"Zone A"}).waitFor();
-      assert.equal(await page.evaluate(()=>window.fixture.calls.filter(x=>x.payload?.op==="start").length),1);
+      assert.equal(await page.evaluate(()=>window.fixture.calls.filter(x=>x.payload?.op==="start").length),2);
+      await page.locator("article").filter({has:page.getByRole("heading",{name:"Zone A"})}).getByRole("button",{name:"Stop preview"}).click();
+      await page.getByRole("heading",{name:"Zone B"}).waitFor();
       await page.getByRole("button",{name:"Stop preview"}).click();
       await page.getByText("No active previews.",{exact:false}).waitFor();
-      await page.getByRole("textbox",{name:"Zone name"}).fill("Zone B");
+      await page.getByRole("textbox",{name:"Zone name"}).fill("Zone C");
       await page.getByRole("checkbox").first().check();
       await page.evaluate(()=>window.fixture.fail=true);
       await page.getByRole("button",{name:"Start preview"}).click();
       await page.getByRole("status").filter({hasText:"already belongs"}).waitFor();
-      assert.equal(await page.getByRole("heading",{name:"Zone B"}).count(),0);
+      assert.equal(await page.getByRole("heading",{name:"Zone C"}).count(),0);
       assert.equal(await page.evaluate(()=>document.querySelector("lightcadence-panel").shadowRoot.querySelector("main").scrollWidth<=innerWidth),true);
       assert.deepEqual(errors,[]);
       await page.close();

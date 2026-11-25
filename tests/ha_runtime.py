@@ -62,7 +62,7 @@ async def main():
                     "homeassistant": {"name": "Synthetic CI", "latitude": 0, "longitude": 0,
                                       "elevation": 0, "unit_system": "metric", "time_zone": "UTC"},
                     "http": {"server_host": "127.0.0.1", "server_port": HA_PORT},
-                    "websocket_api": {}, "config": {},
+                    "websocket_api": {}, "config": {}, "frontend": {},
                 }, hass)
                 assert result is hass, "HA bootstrap failed"
                 await hass.async_start()

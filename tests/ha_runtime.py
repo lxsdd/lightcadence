@@ -4,14 +4,13 @@ Only synthetic registry entries and test users; runs in a network-none
 container with a disposable configuration. Never loads a real light platform.
 """
 import asyncio
-import os
 from pathlib import Path
 import shutil
 import tempfile
 from uuid import uuid4
 
 from aiohttp import ClientSession, web
-from homeassistant import bootstrap, runner
+from homeassistant import bootstrap, loader, runner
 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -56,6 +55,7 @@ async def main():
             shutil.copytree(ROOT / "custom_components" / "lightcadence",
                             Path(config) / "custom_components" / "lightcadence")
             hass = HomeAssistant(config)
+            loader.async_setup(hass)
             hass.config.skip_pip = True
             try:
                 result = await bootstrap.async_from_config_dict({

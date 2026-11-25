@@ -43,8 +43,8 @@ jobs:
         run: docker run --rm --network none --read-only --cap-drop ALL -v "$PWD/tests:/app/tests:ro" lightcadence-ci python -m unittest discover -s tests -v
       - name: Pull versioned official HA runtime
         run: |
-          docker pull ghcr.io/home-assistant/home-assistant:2026.11.2
-          docker image inspect --format '{{json .RepoDigests}}' ghcr.io/home-assistant/home-assistant:2026.11.2
+          docker pull ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f
+          docker image inspect --format '{{json .RepoDigests}}' ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f
       - name: Real HA config flow and authenticated WebSocket regressions (no device I/O)
         run: |
-          docker run --rm --network none --cap-drop ALL --entrypoint python -e PYTHONPATH=/src -v "$PWD:/src:ro" ghcr.io/home-assistant/home-assistant:2026.11.2 /src/tests/ha_runtime.py
+          docker run --rm --network none --cap-drop ALL --entrypoint python -e PYTHONPATH=/src -v "$PWD:/src:ro" ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f /src/tests/ha_runtime.py

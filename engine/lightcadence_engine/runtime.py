@@ -4,7 +4,7 @@ from dataclasses import asdict
 from time import monotonic
 from uuid import uuid4
 
-from .effects import Effect, EffectKind, LightTarget
+from .effects import Effect, EffectKind, LightTarget, linear_channel
 from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
 
@@ -45,6 +45,12 @@ def parse_start(body):
 
 
 def parse_manual_state(body):
+    if isinstance(body, dict) and "rgb" in body:
+        fields(body, ("power", "rgb", "brightness_pct"))
+        rgb, bright = body["rgb"], body["brightness_pct"]
+        if not isinstance(rgb, list) or len(rgb) != 3 or type(bright) is not int or not 1 <= bright <= 100:
+            raise ValueError("invalid sRGB state")
+        return DeviceState(body["power"], LightTarget(*(linear_channel(c) for c in rgb), bright / 100))
     fields(body, ("power", "target"))
     target = fields(body["target"], ("red", "green", "blue", "brightness"))
     return DeviceState(body["power"], LightTarget(**target))
@@ -124,12 +130,12 @@ class PreviewRuntime:
 
 
 class PhysicalRuntime(PreviewRuntime):
-    """Explicit composition candidate, never selected by the installed CLI.
+    """Explicit composition candidate, default deployment remains preview-only.
 
     No preview/physical lease split: the only manager is the original
     PhysicalSessions manager. Targets are render intent, not measured light.
     The injected StatePort must independently verify device identity/state.
-    No production state authority or owner activation is provided here.
+    Deployment requires explicit local configuration; hardware remains unqualified.
     """
 
     def __init__(self, profiles, state_port, *, enabled=False, clock=monotonic):
@@ -192,12 +198,13 @@ class PhysicalRuntime(PreviewRuntime):
         elif op == "stop":
             fields(body, ("op", "session_id", "revision"))
             await self.physical.stop(identity(body["session_id"]), body["revision"])
-        elif op == "manual_set":
-            fields(body, ("op", "request_id", "device_id", "state"))
+        elif op in ("manual_set", "manual_off"):
+            fields(body, ("op", "request_id", "device_id", "state") if op == "manual_set" else
+                   ("op", "request_id", "device_id"))
             request_id = identity(body["request_id"])
             device = identity(body["device_id"])
-            state = parse_manual_state(body["state"])
-            fingerprint = (device, state)
+            state = parse_manual_state(body["state"]) if op == "manual_set" else None
+            fingerprint = (op, device, state)
             previous = self._manual.get(request_id)
             if previous is not None:
                 if previous[0] != fingerprint or previous[1] is None:
@@ -208,7 +215,8 @@ class PhysicalRuntime(PreviewRuntime):
                 # Never replay an uncertain manual write under the same ID,
                 # even after cancellation or loss of the HTTP response.
                 try:
-                    manual_result = await self.physical.manual_set(device, state)
+                    manual_result = (await self.physical.manual_set(device, state) if op == "manual_set"
+                                     else await self.physical.manual_off(device))
                 except BaseException:
                     self._manual[request_id] = (fingerprint, "unconfirmed")
                     raise

@@ -3,7 +3,7 @@
 The discovery reply binds the configured identity to the configured TCP endpoint.
 This is device-reported LAN identity, not cryptographic authentication. No
 network scans, cache fallback, speculative retries or per-frame TCP operations.
-The normal service remains preview-only.
+Default deployment remains preview-only.
 """
 import asyncio
 from contextlib import asynccontextmanager
@@ -14,7 +14,7 @@ import re
 import socket
 
 from .chroma import ChromaV2Adapter, _srgb, _unique_pairs
-from .effects import LightTarget
+from .effects import LightTarget, linear_channel
 from .enrollment import ChromaProfile, Observation
 from .runtime import PhysicalRuntime
 from .sessions import DeviceState
@@ -44,16 +44,11 @@ class LanBinding:
             ChromaV2Adapter(self.profile.device_id, self.profile.host, port)
 
 
-def _linear(channel):
-    value = channel / 255
-    return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
-
-
 def _decode(power, brightness, rgb):
     if power not in ("on", "off") or not 1 <= brightness <= 100 or not 0 <= rgb <= 0xffffff:
         raise LanStateError("invalid RGB state")
     return DeviceState(power == "on", LightTarget(
-        _linear(rgb >> 16), _linear(rgb >> 8 & 255), _linear(rgb & 255), brightness / 100))
+        linear_channel(rgb >> 16), linear_channel(rgb >> 8 & 255), linear_channel(rgb & 255), brightness / 100))
 
 
 def _encode(state):

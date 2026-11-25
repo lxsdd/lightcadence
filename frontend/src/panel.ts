@@ -5,9 +5,12 @@ type Light = {id: string; entity_id: string; name: string; area_id: string | nul
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type Session = {id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
-type Snapshot = {schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; sessions: Session[]; targets: Record<string, {target: RGB}>};
-type Start = {instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number}};
-type Command = Start | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type Snapshot = {schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
+type StopPolicy = "restore" | "hold" | "off";
+type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number}};
+type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
+type Command = Start | Manual | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse"};
 function observationLabel(light: Light): string {
@@ -36,7 +39,8 @@ class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
     zone:{state:true}, effect:{state:true}, period:{state:true}, brightness:{state:true},
-    busy:{state:true}, status:{state:true}, online:{state:true},
+    busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
+    manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
   };
   declare hass?: HA;
   declare catalog?: Catalog;
@@ -52,11 +56,16 @@ class LightCadencePanel extends LitElement {
   private timer?: number;
   private epoch = 0;
   private pendingStart?: Start;
+  declare stopPolicy: StopPolicy;
+  declare manualDevice: string;
+  declare manualColor: string;
+  declare manualBrightness: number;
+  declare pendingManual?: Manual;
   private entry?: string;
   private refreshing = false;
   constructor() {
     super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.period=4;
-    this.brightness=1; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
+    this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
     super.connectedCallback(); this.epoch++;
@@ -73,7 +82,7 @@ class LightCadencePanel extends LitElement {
   private accept(s: Snapshot) {
     const physical=this.catalog?.physical_output_enabled===true;
     if(s.schema_version!==1 || s.output_mode!==(physical?"physical_candidate":"preview") || s.physical_output_enabled!==physical || (physical && (s.hardware_qualified!==false || !Array.isArray(s.enrolled_devices)))) throw new Error("incompatible engine API");
-    if(this.snapshot && this.snapshot.instance_id!==s.instance_id) this.pendingStart=undefined;
+    if(this.snapshot && this.snapshot.instance_id!==s.instance_id) {this.pendingStart=undefined;this.pendingManual=undefined;}
     this.snapshot=s;
   }
   private async refresh(full=false) {
@@ -99,33 +108,52 @@ class LightCadencePanel extends LitElement {
   }
   private async send(payload: Command) {
     if(!this.hass || !this.entry || !this.online || this.busy) return;
+    const manual=payload.op==="manual_set" || payload.op==="manual_off";
+    if(manual && !this.catalog?.physical_output_enabled) return;
     const epoch=++this.epoch; this.refreshing=false; this.busy=true; this.status="Applying engine command…";
     try {
       const physical=this.catalog?.physical_output_enabled===true;
       const command=physical?{...payload,instance_id:payload.instance_id??this.snapshot?.instance_id}:payload;
       const state=await this.hass.callWS<Snapshot>({type:physical?"lightcadence/physical":"lightcadence/preview",entry_id:this.entry,payload:command});
       if(epoch!==this.epoch) return;
-      this.accept(state); this.pendingStart=undefined;
+      this.accept(state);
+      if(payload.op==="start") this.pendingStart=undefined;
+      if(manual) this.pendingManual=undefined;
       if(payload.op==="start") {this.chosen=[]; this.zone="";}
-      this.status=state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
+      this.status=manual?(state.manual_result==="confirmed"?"Manual state readback confirmed (not optical confirmation)":"Manual outcome unconfirmed — inspect device before another command"):state.physical_output_enabled?"Engine command accepted · not optical confirmation":"Preview command confirmed";
     } catch(error) {
       if(epoch===this.epoch) {
         this.status=explain(error);
         // Preserve a potentially delivered start for an explicit identical retry.
         // Known rejections did not create a session.
         const code=typeof error==="object" && error!==null && "code" in error ? String(error.code) : "";
-        if(["device_conflict","stale_revision","stale_instance","invalid_selection","invalid_request","not_found"].includes(code)) this.pendingStart=undefined;
+        if(["device_conflict","stale_revision","stale_instance","invalid_selection","invalid_request","not_found"].includes(code)) {
+          if(payload.op==="start") this.pendingStart=undefined;
+          if(manual) this.pendingManual=undefined;
+        }
       }
     } finally {if(epoch===this.epoch) {this.busy=false; void this.refresh();}}
   }
   private start() {
     if(this.pendingStart) {void this.send(this.pendingStart); return;}
     if(!this.zone.trim() || !this.chosen.length || !Number.isFinite(this.period) || this.period<=0 || !Number.isFinite(this.brightness) || this.brightness<0 || this.brightness>1) return;
-    const payload:Start={op:"start",request_id:Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,"0")).join(""),zone_id:this.zone.trim(),devices:[...this.chosen],
+    const payload:Start={op:"start",request_id:requestId(),zone_id:this.zone.trim(),devices:[...this.chosen],
       effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness}};
-    if(this.catalog?.physical_output_enabled) payload.instance_id=this.snapshot?.instance_id;
+    if(this.catalog?.physical_output_enabled) {payload.instance_id=this.snapshot?.instance_id;payload.stop_policy=this.stopPolicy;}
     this.pendingStart=payload;
     void this.send(payload);
+  }
+  private manual(off: boolean) {
+    if(this.pendingManual) {void this.send(this.pendingManual);return;}
+    if(!this.catalog?.physical_output_enabled || !this.snapshot || !this.catalog.lights.some(l=>l.id===this.manualDevice)) return;
+    const common={instance_id:this.snapshot.instance_id,request_id:requestId(),device_id:this.manualDevice};
+    if(off) this.pendingManual={...common,op:"manual_off"};
+    else {
+      if(!/^#[0-9a-f]{6}$/i.test(this.manualColor) || !Number.isInteger(this.manualBrightness) || this.manualBrightness<1 || this.manualBrightness>100) return;
+      const rgb=[1,3,5].map(i=>parseInt(this.manualColor.slice(i,i+2),16));
+      this.pendingManual={...common,op:"manual_set",state:{power:true,rgb,brightness_pct:this.manualBrightness}};
+    }
+    void this.send(this.pendingManual);
   }
   private toggle(id:string, checked:boolean) {
     this.chosen=checked?[...this.chosen,id]:this.chosen.filter(d=>d!==id);
@@ -147,6 +175,7 @@ class LightCadencePanel extends LitElement {
             <label>Effect <select .value=${this.effect} ?disabled=${formLocked} @change=${(e:Event)=>this.effect=(e.target as HTMLSelectElement).value}>${Object.entries(descriptions).map(([key,title])=>html`<option value=${key}>${title}</option>`)}</select></label>
             <label>Period (seconds) <input type="number" step="any" .value=${String(this.period)} ?disabled=${formLocked} @input=${(e:Event)=>this.period=(e.target as HTMLInputElement).valueAsNumber}></label>
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
+            ${physical?html`<label>Stop behaviour <select .value=${this.stopPolicy} ?disabled=${formLocked} @change=${(e:Event)=>this.stopPolicy=(e.target as HTMLSelectElement).value as StopPolicy}><option value="restore">Restore original state</option><option value="hold">Hold last state</option><option value="off">Turn off</option></select></label>`:nothing}
             <h3>Lamps · ${this.chosen.length} selected</h3>
             ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
             <button class="primary" ?disabled=${!this.online||this.busy||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
@@ -159,6 +188,12 @@ class LightCadencePanel extends LitElement {
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}
           </section>
         </div>
+        ${physical?html`<section class="manual" aria-labelledby="manual"><h2 id="manual">Manual lamp control</h2><p>Take the selected lamp out of any running show before changing it. Other lamps continue. No automatic retry after an uncertain result.</p>
+          <label>Manual lamp <select aria-label="Manual lamp" .value=${this.manualDevice} ?disabled=${this.busy||!!this.pendingManual} @change=${(e:Event)=>this.manualDevice=(e.target as HTMLSelectElement).value}><option value="">Select a lamp</option>${this.catalog?.lights.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
+          <label>Manual colour <input aria-label="Manual colour" type="color" .value=${this.manualColor} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualColor=(e.target as HTMLInputElement).value}></label>
+          <label>Manual brightness (%) <input aria-label="Manual brightness (%)" type="number" min="1" max="100" step="1" .value=${String(this.manualBrightness)} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualBrightness=(e.target as HTMLInputElement).valueAsNumber}></label>
+          ${this.pendingManual?html`<button ?disabled=${!this.online||this.busy} @click=${()=>this.manual(false)}>Check same manual request</button><button ?disabled=${this.busy} @click=${()=>{this.pendingManual=undefined;this.status="Manual outcome may be uncertain. Inspect the device before a new action.";}}>Clear pending request</button>`:html`<button ?disabled=${!this.online||this.busy||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(false)}>Apply colour and turn on</button> <button ?disabled=${!this.online||this.busy||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(true)}>Turn off lamp</button>`}
+        </section>`:nothing}
       </main>`;
   }
   static styles=css`
@@ -166,7 +201,7 @@ class LightCadencePanel extends LitElement {
     *{box-sizing:border-box} main{max-width:1300px;margin:auto;padding:clamp(12px,3vw,32px);overflow-wrap:anywhere}
     h1{font-size:clamp(24px,4vw,34px);margin:0} h2{font-size:20px} h3{font-size:16px;margin:16px 0 8px} p{margin:8px 0} header,.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
     .badge,.notice{border:1px solid var(--divider-color,#687080);border-radius:8px;padding:10px}.notice{margin:16px 0}
-    .workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:16px;margin-top:16px}
+    .manual{margin-top:16px} .workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:16px;margin-top:16px}
     section,article{background:var(--card-background-color,#202735);border:1px solid var(--divider-color,#596273);border-radius:12px;padding:16px;min-width:0} article+article{margin-top:12px}
     label{display:block;margin:10px 0} input:not([type=checkbox]),select{display:block;width:100%;min-height:44px;color:inherit;background:var(--secondary-background-color,#303948);border:1px solid var(--divider-color,#657080);border-radius:6px;padding:8px}
     input[type=checkbox]{width:20px;height:20px;flex:none} .lamp,.target{display:flex;align-items:center;gap:12px;min-height:44px;padding:6px 0} small{display:block;color:var(--secondary-text-color,#bec5cf)}

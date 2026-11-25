@@ -24,3 +24,15 @@ with exact linear RGB state, not interception of ordinary HA or Google Home
 actions. Device identity is protocol-reported, not cryptographic. No hardware
 qualification, durable recovery journal or automatic restart/restore claim.
 Actual installation and hardware commands require separate owner permission.
+
+
+The shared panel now exposes explicit stop behaviour and a cooperative manual
+RGB/on or off action for an enrolled light. RGB8 and integer brightness percent
+are converted by the original engine's canonical linear-light conversion.
+Off reads current complete state after acquiring the manual reservation,
+preserving hidden attributes. Both paths release the lamp from its running
+show before writing; a matching independent readback is distinguished from
+an uncertain result, with no automatic retry. Explicit retry of the same
+request ID cannot replay a recorded uncertain command. Ordinary HA light
+service calls, vendor apps and Google Home are still outside this route.
+Native HA and browser tests use synthetic peers/state only.

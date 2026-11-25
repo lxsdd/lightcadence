@@ -5,6 +5,14 @@ from math import cos, isfinite, pi
 import colorsys
 
 
+def linear_channel(channel: int) -> float:
+    """Canonical 8-bit sRGB to normalized linear-light conversion."""
+    if type(channel) is not int or not 0 <= channel <= 255:
+        raise ValueError("invalid sRGB channel")
+    value = channel / 255
+    return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+
+
 class EffectKind(StrEnum):
     RAINBOW = "rainbow"
     SCANNER = "scanner"

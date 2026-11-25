@@ -92,18 +92,32 @@ try {
         if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
         if(msg.type==="lightcadence/physical" && msg.payload.op==="start")s.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];
         if(msg.type==="lightcadence/physical" && msg.payload.op==="stop")s.sessions=[];
+        if(msg.type==="lightcadence/physical" && ["manual_set","manual_off"].includes(msg.payload.op)){
+          s.sessions=[];return {...structuredClone(s),manual_result:msg.payload.op==="manual_set"?"confirmed":"unconfirmed"};
+        }
         return structuredClone(s);
       }};
     });
     await page.getByText("Hardware test workspace",{exact:true}).waitFor();
     await page.getByRole("textbox",{name:"Zone name"}).fill("Test zone");
     await page.getByRole("checkbox").check();
+    await page.getByLabel("Stop behaviour").selectOption("hold");
     await page.getByRole("button",{name:"Start hardware test"}).click();
     await page.getByRole("heading",{name:"Test zone"}).waitFor();
     await page.getByRole("button",{name:"Stop show"}).click();
     await page.getByText("No active shows.",{exact:false}).waitFor();
+    await page.getByLabel("Manual lamp").selectOption("a");
+    await page.getByLabel("Manual colour").fill("#4080ff");
+    await page.getByLabel("Manual brightness (%)").fill("71");
+    await page.getByRole("button",{name:"Apply colour and turn on"}).click();
+    await page.getByRole("status").filter({hasText:"Manual state readback confirmed"}).waitFor();
+    await page.getByRole("button",{name:"Turn off lamp"}).click();
+    await page.getByRole("status").filter({hasText:"Manual outcome unconfirmed"}).waitFor();
     const calls=await page.evaluate(()=>window.physicalCalls.filter(x=>x.payload));
-    assert.deepEqual(calls.map(x=>[x.type,x.payload.op,x.payload.instance_id]),[["lightcadence/physical","start","physical-instance"],["lightcadence/physical","stop","physical-instance"]]);
+    assert.deepEqual(calls.map(x=>[x.type,x.payload.op,x.payload.instance_id]),["start","stop","manual_set","manual_off"].map(op=>["lightcadence/physical",op,"physical-instance"]));
+    assert.equal(calls[0].payload.stop_policy,"hold");
+    assert.deepEqual(calls[2].payload.state,{power:true,rgb:[64,128,255],brightness_pct:71});
+    assert.equal(calls[3].payload.device_id,"a");
     await page.close();
   });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

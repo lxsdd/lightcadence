@@ -211,9 +211,20 @@ class PhysicalSessions:
         async with self.manual_handover(device_id):
             adapter = self._adapters[device_id]
             await adapter.observe()
-            if await adapter.state_port.write(adapter.profile, state) is not True:
-                return "unconfirmed"
-            return "confirmed" if await adapter.observe() == state else "unconfirmed"
+            return await self._confirmed_write(adapter, state)
+
+    @staticmethod
+    async def _confirmed_write(adapter, state):
+        if await adapter.state_port.write(adapter.profile, state) is not True:
+            return "unconfirmed"
+        return "confirmed" if await adapter.observe() == state else "unconfirmed"
+
+    async def manual_off(self, device_id):
+        """Detach, read the fresh state and turn off without inventing hidden attributes."""
+        async with self.manual_handover(device_id):
+            adapter = self._adapters[device_id]
+            current = await adapter.observe()
+            return await self._confirmed_write(adapter, DeviceState(False, current.target))
 
     async def close(self):
         """Called after command admission and rendering have stopped."""

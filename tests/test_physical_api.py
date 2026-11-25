@@ -7,7 +7,7 @@ import unittest
 from aiohttp import ClientSession
 from aiohttp.test_utils import TestServer
 
-from engine.lightcadence_engine.effects import LightTarget
+from engine.lightcadence_engine.effects import LightTarget, linear_channel
 from engine.lightcadence_engine.enrollment import ChromaProfile, Observation
 from engine.lightcadence_engine.runtime import PhysicalRuntime
 from engine.lightcadence_engine.server import create_app
@@ -179,6 +179,39 @@ class PhysicalApiTests(unittest.IsolatedAsyncioTestCase):
         _, second = await self.request(command)
         self.assertEqual(second["manual_result"], "unconfirmed")
         self.assertEqual(len(self.authority.writes), 1)
+
+    async def test_srgb_manual_state_exact_and_invalid_before_detach(self):
+        await self.start()
+        command = {"op": "manual_set", "request_id": "rgb", "device_id": "lamp",
+                   "state": {"power": True, "rgb": [64, 128, 255], "brightness_pct": 71}}
+        for bad in ({"rgb": [True, 128, 255]}, {"rgb": [256, 0, 0]},
+                    {"brightness_pct": 0}, {"brightness_pct": 50.5}):
+            code, _ = await self.request({**command, "state": {**command["state"], **bad}})
+            self.assertEqual(code, 400)
+        self.assertIsNotNone(self.runtime.manager.owner("lamp"))
+        self.assertEqual(self.authority.writes, [])
+        code, result = await self.request(command)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["manual_result"], "confirmed")
+        self.assertEqual(self.authority.writes, [DeviceState(True, LightTarget(
+            linear_channel(64), linear_channel(128), 1, .71))])
+        await self.request(command)
+        self.assertEqual(len(self.authority.writes), 1)
+
+    async def test_manual_off_uses_fresh_target_and_never_replays(self):
+        await self.start()
+        current = DeviceState(True, LightTarget(.2, .4, .8, .51))
+        self.authority.value = current
+        command = {"op": "manual_off", "request_id": "off", "device_id": "lamp"}
+        code, result = await self.request(command)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["manual_result"], "confirmed")
+        self.assertEqual(self.authority.writes, [DeviceState(False, current.target)])
+        self.assertIsNone(self.runtime.manager.owner("lamp"))
+        self.assertEqual(result["targets"], {})
+        await self.request(command)
+        self.assertEqual(len(self.authority.writes), 1)
+        self.assertEqual((await self.request({**command, "op": "manual_set", "state": MANUAL}))[0], 400)
 
     async def test_shutdown_closes_local_transport_without_restore_claim(self):
         await self.start()

@@ -44,3 +44,35 @@ states and unsupported/unknown colour modes are distinguished without invented
 values. HA cached state is not an independent physical readback and must not be
 wired as a confirmed StatePort. Device identity, verified restore, activation
 and cooperating cross-process HA action routing still require qualification.
+
+
+## Directed Yeelight LAN state authority (candidate)
+
+`YeelightLanStatePort` implements the existing StatePort using a fresh, directed
+UDP discovery probe and a short-lived TCP command connection for each
+transaction. The explicitly configured LAN protocol ID, model, firmware,
+advertised location and supported commands must match the enrolled profile.
+No multicast scan, cache fallback, network retries or per-frame TCP reads.
+The TCP parser correlates command IDs and ignores unsolicited props. Only
+complete RGB states with inactive flow/music modes are admitted. Device RGB
+integers are converted from sRGB to normalized linear light, and restoration
+uses the inverse conversion with exact representability checks. A write ACK
+is separate from a subsequent independent read; failure keeps the existing
+lease. An already-off lamp is never powered on to change hidden RGB state;
+such an unrepresentable restore remains pending. An on lamp can restore RGB
+then switch off; a transient colour change is possible. Manual targets not
+exactly representable by the LAN protocol are refused before I/O.
+
+The reference is the public Yeelight WiFi Light Inter-Operation Specification
+and the documented python-yeelight directed capability probe; this is an
+independent wire implementation, not copied library source. A fresh device
+announcement is not a cryptographic identity proof, and external clients or
+IP reassignment may race the transaction. Firmware support, quota behavior,
+off-state attributes, endpoint responses and optical fidelity require actual
+owner-approved hardware acceptance. No retry loop attempts to bypass quotas.
+
+`compose_lan_candidate` combines these bindings with the original
+PhysicalRuntime/PhysicalSessions; construction performs no network I/O and
+requires explicit opt-in. Installed CLI and native HA UI remain preview-only.
+Loopback fixtures exercise the original UDP discovery, TCP state and Chroma
+UDP paths together, not a real lamp.

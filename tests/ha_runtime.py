@@ -93,7 +93,8 @@ async def main():
                     suggested_object_id="synthetic_hidden", hidden_by=er.RegistryEntryHider.USER)
                 sensor = registry.async_get_or_create("sensor", "demo", "synthetic-sensor",
                                                       suggested_object_id="synthetic_sensor")
-                hass.states.async_set(a.entity_id, "on", {"friendly_name": "Synthetic A"})
+                hass.states.async_set(a.entity_id, "on", {"friendly_name": "Synthetic A",
+                    "color_mode": "rgb", "rgb_color": (64, 128, 255), "brightness": 120})
                 hass.states.async_set(b.entity_id, "off", {"friendly_name": "Synthetic B"})
                 async with ClientSession() as session:
                     async with await auth(session, admin) as ws:
@@ -109,6 +110,23 @@ async def main():
                         assert catalog["result"]["entries"] == [entry_id]
                         assert {x["id"] for x in catalog["result"]["lights"]} == {a.id, b.id}
                         assert not catalog["result"]["physical_output_enabled"]
+                        by_id = {x["id"]: x["observation"] for x in catalog["result"]["lights"]}
+                        assert by_id[a.id] == {"source": "ha_cache", "status": "cached_rgb",
+                            "power": True, "color_mode": "rgb", "rgb": [64, 128, 255], "brightness": 120}
+                        assert by_id[b.id]["power"] is False
+                        assert by_id[b.id]["rgb"] is None
+                        assert by_id[b.id]["status"] == "unsupported_or_unknown_mode"
+                        from custom_components.lightcadence.catalog import cached_light_state
+                        hass.states.async_set(b.entity_id, "on", {"color_mode": "rgb",
+                            "rgb_color": (0, 1, 2), "brightness": 10, "effect": "rainbow"})
+                        assert cached_light_state(hass.states.get(b.entity_id))["status"] == "effect_active"
+                        hass.states.async_set(b.entity_id, "on", {"color_mode": "color_temp",
+                            "rgb_color": (0, 1, 2), "brightness": 10})
+                        assert cached_light_state(hass.states.get(b.entity_id))["rgb"] is None
+                        hass.states.async_set(b.entity_id, "on", {"color_mode": "rgb", "brightness": 10})
+                        assert cached_light_state(hass.states.get(b.entity_id))["status"] == "incomplete_rgb"
+                        hass.states.async_set(b.entity_id, "unavailable")
+                        assert cached_light_state(hass.states.get(b.entity_id))["power"] is None
                         renamed = registry.async_update_entity(a.entity_id, new_entity_id="light.synthetic_renamed")
                         assert renamed.id == a.id
                         catalog = await command(ws, 3, "lightcadence/catalog")

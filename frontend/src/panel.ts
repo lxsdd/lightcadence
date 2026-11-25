@@ -1,7 +1,7 @@
 import {LitElement, css, html, nothing} from "lit";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
-type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean};
+type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: false};
 type Session = {id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
@@ -10,6 +10,13 @@ type Start = {op: "start"; request_id: string; zone_id: string; devices: string[
 type Command = Start | {op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse"};
+function observationLabel(light: Light): string {
+  const o=light.observation;
+  if(!o || o.source!=="ha_cache") return "No cached state";
+  const power=o.power===null?"Unknown":o.power?"On":"Off";
+  const label=({cached_rgb:"RGB cached",effect_active:"Effect active",incomplete_rgb:"Incomplete RGB",unsupported_or_unknown_mode:"Mode unsupported or unknown",unavailable:"Unavailable"} as Record<string,string>)[o.status]??"State unknown";
+  return power+" · "+label+" (HA cache, not device feedback)";
+}
 function explain(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
   return ({device_conflict:"A selected lamp already belongs to another preview. Choose other lamps or stop that session.",
@@ -134,7 +141,7 @@ class LightCadencePanel extends LitElement {
             <label>Period (seconds) <input type="number" step="any" .value=${String(this.period)} ?disabled=${formLocked} @input=${(e:Event)=>this.period=(e.target as HTMLInputElement).valueAsNumber}></label>
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
             <h3>Lamps · ${this.chosen.length} selected</h3>
-            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${locked.has(l.id)?"In preview":l.available?"Available":"Unavailable in HA"}</small></span></label>`):html`<p>No registered lights available.</p>`}
+            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${locked.has(l.id)?"In preview":l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
             <button class="primary" ?disabled=${!this.online||this.busy||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>

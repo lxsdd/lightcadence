@@ -5,6 +5,8 @@ state authority, not a proof of physical identity or optical output. It must
 return a complete supported RGB state (including when off), and independently
 read back confirmed state after a write. No discovery or implicit activation.
 """
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from math import isfinite
 from time import monotonic
@@ -150,13 +152,14 @@ class PhysicalSessions:
         self._pending.add(request_id)
         attempted = []
         try:
-            originals = {}
-            for d in selected:
-                originals[d] = await self._adapters[d].observe()
-            for d in selected:
-                adapter = self._adapters[d].transport
-                attempted.append(adapter)
-                await adapter.acquire()
+            # Complete all snapshot reads before opening any UDP session.
+            # Independent devices run concurrently; a failed child never
+            # escapes the batch while its siblings are still executing.
+            captured = await self._settle(
+                [self._adapters[d].observe() for d in selected])
+            originals = dict(zip(selected, captured, strict=True))
+            attempted = [self._adapters[d].transport for d in selected]
+            await self._settle([adapter.acquire() for adapter in attempted])
             session = self.manager.start(request_id, zone_id, originals, effect, policy, coordinates)
             self._requests[request_id] = (fingerprint, session.id)
             return session
@@ -167,6 +170,39 @@ class PhysicalSessions:
         finally:
             self._reserved.difference_update(selected)
             self._pending.discard(request_id)
+
+    @staticmethod
+    async def _settle(operations):
+        results = await asyncio.gather(*operations, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return results
+
+    @asynccontextmanager
+    async def manual_handover(self, device_id):
+        """Reserve a device for one cooperating manual operation.
+
+        The caller must await all its I/O inside the context, including
+        cancellation cleanup. Admission/other manual writers are refused
+        until exit. This is not a lock on HA or other external LAN clients.
+        A stale revision or failed transport release never grants permission.
+        """
+        if device_id not in self._adapters:
+            raise SessionError("device not enrolled")
+        if device_id in self._reserved:
+            raise Conflict({device_id: "operation_pending"})
+        self._reserved.add(device_id)
+        try:
+            owner = self.manager.owner(device_id)
+            if owner is not None:
+                current = self.manager.snapshot(owner)
+                await self.output.detach(owner, current.revision, device_id)
+            if self.manager.owner(device_id) is not None:
+                raise SessionError("manual operation not granted")
+            yield
+        finally:
+            self._reserved.discard(device_id)
 
     def tick(self):
         for session in self.manager.snapshots():

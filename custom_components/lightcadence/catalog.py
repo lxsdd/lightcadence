@@ -6,6 +6,38 @@ an entity registry entry. Multi-channel devices and groups need later mapping.
 from homeassistant.helpers import entity_registry as er
 
 
+def cached_light_state(state):
+    """Describe HA's cached state, never infer fresh device feedback.
+
+    Off lights frequently omit their previous colour/brightness. No fallback
+    values are invented. The projection is diagnostic only, not a StatePort.
+    """
+    if state is None or state.state not in ("on", "off"):
+        return {"source": "ha_cache", "status": "unavailable", "power": None,
+                "color_mode": None, "rgb": None, "brightness": None}
+    attrs = state.attributes
+    mode = attrs.get("color_mode")
+    mode = mode if isinstance(mode, str) else None
+    rgb = attrs.get("rgb_color")
+    brightness = attrs.get("brightness")
+    rgb_valid = (isinstance(rgb, (list, tuple)) and len(rgb) == 3
+                 and all(type(x) is int and 0 <= x <= 255 for x in rgb))
+    brightness_valid = type(brightness) is int and 1 <= brightness <= 255
+    effect = attrs.get("effect")
+    if effect not in (None, "off"):
+        status = "effect_active"
+    elif mode != "rgb":
+        status = "unsupported_or_unknown_mode"
+    elif not rgb_valid or not brightness_valid:
+        status = "incomplete_rgb"
+    else:
+        status = "cached_rgb"
+    return {"source": "ha_cache", "status": status, "power": state.state == "on",
+            "color_mode": mode,
+            "rgb": list(rgb) if mode == "rgb" and rgb_valid else None,
+            "brightness": brightness if brightness_valid else None}
+
+
 def light_catalog(hass):
     lights = []
     for entry in er.async_get(hass).entities.values():
@@ -21,6 +53,7 @@ def light_catalog(hass):
             "area_id": entry.area_id,
             "available": state is not None and state.state not in ("unavailable", "unknown"),
             "physical_output_enabled": False,
+            "observation": cached_light_state(state),
         })
     return sorted(lights, key=lambda item: (item["name"].casefold(), item["id"]))
 

@@ -162,3 +162,87 @@ class EnrollmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.manager.snapshots(), ())
         self.assertFalse(self.runtime._adapters["lamp"].transport.ready)
         self.assertEqual((await self.start()).phase, Phase.RUNNING)
+
+
+    async def test_manual_context_holds_reservation_and_never_restores(self):
+        session = await self.start()
+        async with self.runtime.manual_handover("lamp"):
+            self.assertIsNone(self.runtime.manager.owner("lamp"))
+            self.assertFalse(self.runtime._adapters["lamp"].transport.ready)
+            with self.assertRaises(Conflict):
+                await self.runtime.start("new", "zone", ["lamp"], EFFECT)
+            with self.assertRaises(Conflict):
+                async with self.runtime.manual_handover("lamp"):
+                    self.fail("concurrent manual writer granted")
+            self.state.states["lamp"] = CHANGED
+        stopped = await self.runtime.stop(session.id, self.runtime.manager.snapshot(session.id).revision)
+        self.assertEqual(stopped.phase, Phase.STOPPED)
+        self.assertEqual(self.state.writes, [])
+        self.assertEqual(self.state.states["lamp"], CHANGED)
+        self.assertEqual((await self.start("new")).phase, Phase.RUNNING)
+
+    async def test_manual_context_releases_on_exception_but_not_during_admission(self):
+        self.state.gate.clear()
+        task = asyncio.create_task(self.start())
+        await self.state.entered.wait()
+        with self.assertRaises(Conflict):
+            async with self.runtime.manual_handover("lamp"):
+                self.fail("admission was interrupted")
+        self.state.gate.set()
+        await task
+        with self.assertRaisesRegex(RuntimeError, "manual failure"):
+            async with self.runtime.manual_handover("lamp"):
+                raise RuntimeError("manual failure")
+        self.assertEqual((await self.start("new")).phase, Phase.RUNNING)
+
+    async def test_parallel_acquisition_and_atomic_failure(self):
+        second = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        second.bind(("127.0.0.1", 0))
+        second.setblocking(False)
+        self.addCleanup(second.close)
+        p2 = replace(self.p, device_id="other", ha_registry_id="other-ha",
+                     port=second.getsockname()[1])
+        batch = PhysicalSessions([self.p, p2], self.state, enabled=True)
+        for adapter in batch._adapters.values():
+            self.addCleanup(adapter.transport.close)
+        loop = asyncio.get_running_loop()
+        async def receive_both():
+            async with asyncio.timeout(.8):
+                return await asyncio.gather(loop.sock_recvfrom(self.peer, 4096),
+                                            loop.sock_recvfrom(second, 4096))
+        pending = asyncio.create_task(batch.start("batch", "zone", ["lamp", "other"], EFFECT))
+        first, other = await receive_both()
+        # Both requests arrived before either peer responded.
+        for peer, (data, addr), success in ((self.peer, first, True), (second, other, False)):
+            msg = json.loads(data)
+            self.assertEqual(msg["method"], "udp_sess_new")
+            reply = {"id": msg["id"], "method": "udp_sess_token",
+                     "params": {"token": "a" * 32}} if success else {"id": msg["id"], "error": {"code": -1}}
+            peer.sendto(json.dumps(reply).encode(), addr)
+        with self.assertRaises(OSError):
+            await pending
+        self.assertEqual(batch.manager.snapshots(), ())
+        self.assertTrue(all(not a.transport.ready for a in batch._adapters.values()))
+        pending = asyncio.create_task(batch.start("batch", "zone", ["lamp", "other"], EFFECT))
+        first, other = await receive_both()
+        for peer, (data, addr) in ((self.peer, first), (second, other)):
+            msg = json.loads(data)
+            peer.sendto(json.dumps({"id": msg["id"], "method": "udp_sess_token",
+                                     "params": {"token": "b" * 32}}).encode(), addr)
+        self.assertEqual((await pending).devices, ("lamp", "other"))
+
+    async def test_parallel_reads_finish_before_any_acquisition(self):
+        p2 = replace(self.p, device_id="other", ha_registry_id="other-ha",
+                     port=12345 if self.p.port != 12345 else 12346)
+        batch = PhysicalSessions([self.p, p2], self.state, enabled=True)
+        self.state.gate.clear()
+        self.state.mode = "ct"
+        pending = asyncio.create_task(batch.start("batch", "zone", ["lamp", "other"], EFFECT))
+        await self.state.entered.wait()
+        await asyncio.sleep(0)
+        self.assertCountEqual(self.state.reads, ["lamp", "other"])
+        self.state.gate.set()
+        with self.assertRaises(SessionError):
+            await pending
+        self.assertTrue(all(a.transport._socket is None for a in batch._adapters.values()))
+        self.assertEqual(batch.manager.snapshots(), ())

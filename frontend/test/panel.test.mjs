@@ -25,7 +25,7 @@ try {
         const snapshot=()=>({schema_version:1,instance_id:"synthetic",output_mode:"preview",physical_output_enabled:false,sessions:structuredClone(f.sessions),targets:structuredClone(f.targets)});
         window.syntheticHA={callWS:async msg=>{
           f.calls.push(structuredClone(msg));
-          if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+          if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null,observation:{source:"ha_cache",status:id==="a"?"cached_rgb":"incomplete_rgb",power:id==="a",color_mode:"rgb",rgb:id==="a"?[64,128,255]:null,brightness:id==="a"?120:null}}))};
           if(msg.type==="lightcadence/state")return snapshot();
           const p=msg.payload;
           if(f.fail){f.fail=false;throw {code:"device_conflict"};}
@@ -43,6 +43,8 @@ try {
         el.hass=window.syntheticHA;
       });
       await page.getByText("Connected",{exact:true}).waitFor();
+      await page.getByText("On · RGB cached (HA cache, not device feedback)",{exact:true}).waitFor();
+      await page.getByText("Off · Incomplete RGB (HA cache, not device feedback)",{exact:true}).waitFor();
       await page.getByRole("textbox",{name:"Zone name"}).fill("Zone A");
       await page.getByRole("checkbox").nth(0).check();
       await page.getByRole("checkbox").nth(1).check();

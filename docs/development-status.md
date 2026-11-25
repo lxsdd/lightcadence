@@ -14,8 +14,8 @@ to loopback, with no published port, non-root user, read-only filesystem and
 no capabilities. The owner must supply a locally generated token file readable
 by UID 10001; never publish it or expose the engine listener.
 No installation, release, device transport or hardware qualification is claimed.
-The container base is version-tagged; digest locking and full dependency
-security/license inventory remain required before a candidate.
+The container base is pinned to the digest observed on the standard runner;
+full dependency security/license inventory remains required before a candidate.
 Original core and real loopback HTTP regressions run in engine-core; HA native
 runtime and frontend/browser gates must be added before block 1 completion.
 Next: validate HA config/bridge in real HA test runtime, build the shared Lit

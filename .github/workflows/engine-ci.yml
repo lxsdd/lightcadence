@@ -47,4 +47,10 @@ jobs:
           docker image inspect --format '{{json .RepoDigests}}' ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f
       - name: Real HA config flow and authenticated WebSocket regressions (no device I/O)
         run: |
-          docker run --rm --network none --cap-drop ALL --entrypoint python -e PYTHONPATH=/src -v "$PWD:/src:ro" ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f /src/tests/ha_runtime.py
+          # HA initializes its native mDNS resolver even for loopback clients.
+          # An internal bridge supplies an interface without external routing.
+          network="lightcadence-ha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker network create --internal "$network"
+          trap 'docker network rm "$network" >/dev/null' EXIT
+          test "$(docker network inspect --format '{{.Internal}}' "$network")" = true
+          docker run --rm --network "$network" --cap-drop ALL --entrypoint python -e PYTHONPATH=/src -v "$PWD:/src:ro" ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f /src/tests/ha_runtime.py

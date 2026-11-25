@@ -1,6 +1,6 @@
 """Real pinned HA runtime, real config flow and authenticated WebSocket test.
 
-Only synthetic registry entries and test users; runs in a network-none
+Only synthetic registry entries and test users; runs in a private, internal Docker network
 container with a disposable configuration. Never loads a real light platform.
 """
 import asyncio

@@ -14,6 +14,7 @@ from aiohttp import ClientSession, web
 from homeassistant import bootstrap, loader, runner
 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.const import __version__ as HA_VERSION
 
@@ -106,6 +107,10 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
         async with await auth(session, ordinary) as ws:
             denied = await command(ws, 1, "lightcadence/physical", entry_id=entry_id, payload=start)
             assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
+            denied = await command(ws, 2, "call_service", domain="lightcadence", service="turn_off",
+                                   service_data={"entity_id": a.entity_id})
+            assert not denied["success"], denied
+            assert not authority.writes
         async with await auth(session, admin) as ws:
             cat = await command(ws, 1, "lightcadence/catalog")
             assert cat["success"] and cat["result"]["physical_output_enabled"], cat
@@ -138,13 +143,40 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
             result = await command(ws, 8, "lightcadence/physical", entry_id=entry_id, payload=off)
             assert result["success"] and result["result"]["manual_result"] == "confirmed", result
             assert authority.states[a.id] == _decode("off", 71, 0x4080ff)
-            stopped = await command(ws, 9, "lightcadence/physical", entry_id=entry_id,
-                payload={"op": "stop", "session_id": s["id"], "revision": after["revision"],
+            # An explicit HA automation action uses the same engine reservation,
+            # not a second LAN writer. Invalid and unenrolled actions do not detach.
+            for service, data in (("turn_on", {"entity_id": c.entity_id}),
+                                  ("set_rgb", {"entity_id": b.entity_id, "rgb_color": [True, 0, 0], "brightness_pct": 40})):
+                denied = await command(ws, 9 if service == "turn_on" else 10, "call_service",
+                                       domain="lightcadence", service=service, service_data=data)
+                assert not denied["success"], denied
+            assert runtime.manager.owner(b.id) == s["id"]
+            assert len(authority.writes) == 2
+            turned_on = await command(ws, 11, "call_service", domain="lightcadence", service="turn_on",
+                                      service_data={"entity_id": a.entity_id})
+            assert turned_on["success"], turned_on
+            assert authority.states[a.id] == _decode("on", 71, 0x4080ff)
+            await hass.services.async_call("lightcadence", "set_rgb",
+                {"entity_id": b.entity_id, "rgb_color": [16, 32, 64], "brightness_pct": 45},
+                blocking=True)
+            assert authority.states[b.id] == _decode("on", 45, 0x102040)
+            assert runtime.manager.owner(b.id) is None
+            assert runtime.manager.snapshot(s["id"]).phase.value == "stopped"
+            stopped = await command(ws, 12, "lightcadence/physical", entry_id=entry_id,
+                payload={"op": "stop", "session_id": s["id"], "revision": runtime.manager.snapshot(s["id"]).revision,
                          "instance_id": runtime.instance_id})
             assert stopped["success"] and stopped["result"]["sessions"][0]["phase"] == "stopped", stopped
-            assert authority.states[a.id] == _decode("off", 71, 0x4080ff)
-            assert [d for d, _ in authority.writes].count(a.id) == 2
+            assert authority.states[a.id] == _decode("on", 71, 0x4080ff)
+            assert authority.states[b.id] == _decode("on", 45, 0x102040)
+            assert [d for d, _ in authority.writes].count(a.id) == 3
+            assert [d for d, _ in authority.writes].count(b.id) == 1
         assert await hass.config_entries.async_unload(entry_id)
+        try:
+            await hass.services.async_call("lightcadence", "turn_off", {"entity_id": a.entity_id}, blocking=True)
+        except HomeAssistantError:
+            pass
+        else:
+            raise AssertionError("unloaded engine accepted an action")
     finally:
         if engine is not None:
             await engine.cleanup()
@@ -247,6 +279,12 @@ async def main():
                                 "lightcadence/preview", entry_id=entry_id,
                                 payload={**payload, "devices": [a.id, bad]})
                             assert not denied["success"] and denied["error"]["code"] == "invalid_selection"
+                        try:
+                            await hass.services.async_call("lightcadence", "turn_off", {"entity_id": renamed.entity_id}, blocking=True)
+                        except HomeAssistantError:
+                            pass
+                        else:
+                            raise AssertionError("preview accepted physical action")
                         refused = await command(ws, 8, "lightcadence/physical", entry_id=entry_id, payload=payload)
                         assert not refused["success"] and refused["error"]["code"] == "incompatible_engine"
                         empty = await command(ws, 9, "lightcadence/state", entry_id=entry_id)

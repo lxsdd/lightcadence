@@ -198,7 +198,7 @@ class PhysicalRuntime(PreviewRuntime):
         elif op == "stop":
             fields(body, ("op", "session_id", "revision"))
             await self.physical.stop(identity(body["session_id"]), body["revision"])
-        elif op in ("manual_set", "manual_off"):
+        elif op in ("manual_set", "manual_off", "manual_on"):
             fields(body, ("op", "request_id", "device_id", "state") if op == "manual_set" else
                    ("op", "request_id", "device_id"))
             request_id = identity(body["request_id"])
@@ -216,7 +216,7 @@ class PhysicalRuntime(PreviewRuntime):
                 # even after cancellation or loss of the HTTP response.
                 try:
                     manual_result = (await self.physical.manual_set(device, state) if op == "manual_set"
-                                     else await self.physical.manual_off(device))
+                                     else await self.physical.manual_power(device, op == "manual_on"))
                 except BaseException:
                     self._manual[request_id] = (fingerprint, "unconfirmed")
                     raise

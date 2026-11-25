@@ -219,12 +219,17 @@ class PhysicalSessions:
             return "unconfirmed"
         return "confirmed" if await adapter.observe() == state else "unconfirmed"
 
-    async def manual_off(self, device_id):
-        """Detach, read the fresh state and turn off without inventing hidden attributes."""
+    async def manual_power(self, device_id, power):
+        """Detach and change power while retaining the fresh complete RGB target."""
+        if type(power) is not bool:
+            raise SessionError("invalid manual power")
         async with self.manual_handover(device_id):
             adapter = self._adapters[device_id]
             current = await adapter.observe()
-            return await self._confirmed_write(adapter, DeviceState(False, current.target))
+            return await self._confirmed_write(adapter, DeviceState(power, current.target))
+
+    async def manual_off(self, device_id):
+        return await self.manual_power(device_id, False)
 
     async def close(self):
         """Called after command admission and rendering have stopped."""

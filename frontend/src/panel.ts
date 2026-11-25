@@ -168,7 +168,7 @@ class LightCadencePanel extends LitElement {
     return html`
       <main>
         <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
-        <p class="notice">${physical?"Hardware candidate — real lamp commands are enabled for enrolled devices only. Not hardware-qualified. Ordinary HA/Google Home actions are not coordinated. Colours are targets, not optical feedback.":"Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback."}</p>
+        <p class="notice">${physical?"Hardware candidate — real lamp commands are enabled for enrolled devices only. Not hardware-qualified. Use explicit LightCadence HA actions for cooperating automations. Ordinary light services and Google Home are not intercepted. Colours are targets, not optical feedback.":"Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback."}</p>
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
         <div class="workspace">
           <section aria-labelledby="setup"><h2 id="setup">${physical?"New zone show":"New zone preview"}</h2>

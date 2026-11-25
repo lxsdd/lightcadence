@@ -213,6 +213,21 @@ class PhysicalApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.authority.writes), 1)
         self.assertEqual((await self.request({**command, "op": "manual_set", "state": MANUAL}))[0], 400)
 
+    async def test_manual_on_preserves_fresh_target_and_fences_replay(self):
+        await self.start()
+        current = DeviceState(False, LightTarget(.2, .4, .8, .51))
+        self.authority.value = current
+        command = {"op": "manual_on", "request_id": "on", "device_id": "lamp"}
+        code, result = await self.request(command)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["manual_result"], "confirmed")
+        self.assertEqual(self.authority.writes, [DeviceState(True, current.target)])
+        self.assertIsNone(self.runtime.manager.owner("lamp"))
+        self.assertEqual(result["targets"], {})
+        await self.request(command)
+        self.assertEqual(len(self.authority.writes), 1)
+        self.assertEqual((await self.request({**command, "op": "manual_off"}))[0], 400)
+
     async def test_shutdown_closes_local_transport_without_restore_claim(self):
         await self.start()
         await self.server.close()

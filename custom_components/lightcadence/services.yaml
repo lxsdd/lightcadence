@@ -1,0 +1,48 @@
+set_rgb:
+  name: Set RGB and turn on
+  description: Cooperatively release one enrolled lamp from its show and apply an exact RGB state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+    rgb_color:
+      name: RGB colour
+      required: true
+      selector:
+        color_rgb:
+    brightness_pct:
+      name: Brightness
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+turn_on:
+  name: Turn on enrolled lamp
+  description: Release one enrolled lamp from its show and turn it on with its fresh RGB state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+turn_off:
+  name: Turn off enrolled lamp
+  description: Release one enrolled lamp from its show and turn it off preserving its fresh RGB state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light

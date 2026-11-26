@@ -68,7 +68,7 @@ def create_app(token, runtime=None):
             return error("invalid_content_type", 415)
         try:
             payload = await request.json()
-            if physical or (isinstance(payload, dict) and payload.get("op") in ("library_save", "library_delete", "timeline_control")):
+            if physical or (isinstance(payload, dict) and payload.get("op") in ("library_save", "library_delete", "timeline_control", "mix_control")):
                 if not isinstance(payload, dict) or payload.get("instance_id") != runtime.instance_id:
                     return error("stale_instance", 409)
                 payload = {k: v for k, v in payload.items() if k != "instance_id"}

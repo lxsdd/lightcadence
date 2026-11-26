@@ -93,6 +93,8 @@ class PreviewRuntime:
 
     def session_state(self, session):
         result = asdict(session)
+        if session.phase is Phase.RUNNING:
+            result["mix"] = self.manager.mix_state(session.id)
         timeline = self.manager.timeline_state(session.id)
         if timeline is not None:
             if session.effect.auto_end:
@@ -102,6 +104,14 @@ class PreviewRuntime:
         return result
 
     def command(self, body):
+        if isinstance(body, dict) and body.get("op") == "mix_control":
+            fields(body, ("op", "session_id", "revision", "action", "value"), ("index",))
+            if (body["action"] != "master") != ("index" in body):
+                raise ValueError("group index required only for group controls")
+            self.manager.mix_control(identity(body["session_id"]), body["revision"],
+                                     body["action"], body["value"], body.get("index"))
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") == "timeline_control":
             fields(body, ("op", "session_id", "revision", "action"), ("position",))
             if (body["action"] == "seek") != ("position" in body):
@@ -232,6 +242,14 @@ class PhysicalRuntime(PreviewRuntime):
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
+        if isinstance(body, dict) and body.get("op") == "mix_control":
+            fields(body, ("op", "session_id", "revision", "action", "value"), ("index",))
+            if (body["action"] != "master") != ("index" in body):
+                raise ValueError("group index required only for group controls")
+            self.manager.mix_control(identity(body["session_id"]), body["revision"],
+                                     body["action"], body["value"], body.get("index"))
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") == "timeline_control":
             fields(body, ("op", "session_id", "revision", "action"), ("position",))
             if (body["action"] == "seek") != ("position" in body):

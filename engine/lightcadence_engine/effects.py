@@ -111,7 +111,7 @@ class Effect:
         if groups and covered != selected:
             raise ValueError("every selected lamp must belong to a nonempty layer or track")
 
-    def render(self, elapsed: float, position: float, audio=None, device_id=None) -> LightTarget:
+    def render(self, elapsed: float, position: float, audio=None, device_id=None, group_gains=None) -> LightTarget:
         if (not isfinite(elapsed) or elapsed < 0 or
                 not isfinite(position) or not 0 <= position <= 1):
             raise ValueError("invalid elapsed time or position")
@@ -123,25 +123,31 @@ class Effect:
                 return LightTarget(0., 0., 0., 0.)
             at = elapsed % duration if self.loop else elapsed
             rgb = (0., 0., 0.)
-            for track in self.tracks:
+            for index, track in enumerate(self.tracks):
+                gain = 1. if group_gains is None else group_gains[index]
+                if gain == 0.:
+                    continue
                 if track.devices is not None and device_id not in track.devices:
                     continue
                 for clip in track.clips:
                     local = at - clip.start
                     if 0 <= local < clip.duration:
                         target = clip.layer.effect.render(local, position, audio)
-                        rgb = blend_linear(rgb, target, clip.level(local), clip.layer.blend)
+                        rgb = blend_linear(rgb, target, clip.level(local) * gain, clip.layer.blend)
             peak = max(rgb)
             return LightTarget(*(v / peak if peak else 0. for v in rgb), peak * self.brightness)
         if self.kind is EffectKind.STATIC:
             return LightTarget(*self.color, self.brightness)
         if self.kind is EffectKind.LAYERED:
             rgb = (0., 0., 0.)
-            for layer in self.layers:
+            for index, layer in enumerate(self.layers):
+                gain = 1. if group_gains is None else group_gains[index]
+                if gain == 0.:
+                    continue
                 if layer.devices is not None and device_id not in layer.devices:
                     continue
                 target = layer.effect.render(elapsed, position, audio)
-                rgb = blend_linear(rgb, target, layer.opacity, layer.blend)
+                rgb = blend_linear(rgb, target, layer.opacity * gain, layer.blend)
             peak = max(rgb)
             return LightTarget(*(v / peak if peak else 0. for v in rgb), peak * self.brightness)
         if self.kind is EffectKind.AUDIO_SPECTRUM:

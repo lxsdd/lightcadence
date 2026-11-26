@@ -5,7 +5,7 @@ loop. A future transport adapter must serialize per-device output and
 revalidate intents immediately before I/O. This core cannot lock external
 LAN clients, observe physical light output, or restore actual hardware.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from math import isfinite
 from time import monotonic
@@ -105,6 +105,10 @@ class _Session:
     timeline_offset: float = 0.
     timeline_paused: bool = False
     frozen_audio: tuple[float, float, float] | None = None
+    master_gain: float = 1.
+    gains: list[float] = field(default_factory=list)
+    muted: list[bool] = field(default_factory=list)
+    solo: list[bool] = field(default_factory=list)
 
     def snapshot(self) -> SessionSnapshot:
         return SessionSnapshot(
@@ -191,6 +195,10 @@ class SessionManager:
             raise SessionError("invalid engine clock")
         session = _Session(str(uuid4()), zone_id, effect, coordinates, originals,
                            stop_policy, now)
+        count = len(effect.layers) + len(effect.tracks)
+        session.gains = [1.] * count
+        session.muted = [False] * count
+        session.solo = [False] * count
         self._sessions[session.id] = session
         self._owners.update((d, session.id) for d in originals)
         self._requests[request_id] = (fingerprint, session.id)
@@ -277,6 +285,47 @@ class SessionManager:
             session.latest.pop(device, None)
         return session.snapshot()
 
+    def mix_state(self, session_id):
+        session = self._get(session_id)
+        return {"master": session.master_gain, "groups": [
+            {"gain": gain, "muted": mute, "solo": solo}
+            for gain, mute, solo in zip(session.gains, session.muted, session.solo)]}
+
+    def mix_control(self, session_id, revision, action, value, index=None):
+        session = self._revision(session_id, revision)
+        if session.phase is not Phase.RUNNING:
+            raise SessionError("session not controllable")
+        if action in ("master", "gain"):
+            if type(value) not in (int, float) or not isfinite(value) or not 0 <= value <= 1:
+                raise SessionError("invalid fader value")
+        elif action in ("mute", "solo"):
+            if type(value) is not bool:
+                raise SessionError("invalid toggle")
+        else:
+            raise SessionError("unknown mixer action")
+        if action == "master":
+            if index is not None:
+                raise SessionError("master takes no group index")
+            session.master_gain = float(value)
+        else:
+            if type(index) is not int or not 0 <= index < len(session.gains):
+                raise SessionError("invalid mixer group index")
+            if action == "gain":
+                session.gains[index] = float(value)
+            elif action == "mute":
+                session.muted[index] = value
+            else:
+                session.solo[index] = value
+        session.revision += 1
+        session.generation += 1
+        # Mix settings never change the original effect, timing, device
+        # ownership or recovery intents. In-flight output is serialized by
+        # the original coordinator; old queued generations are invalid.
+        for device in session.positions:
+            self._mailboxes.pop(device, None)
+            session.latest.pop(device, None)
+        return session.snapshot()
+
     def render(self, session_id: str, target_time: float | None = None) -> int:
         session = self._get(session_id)
         if session.phase is not Phase.RUNNING:
@@ -292,9 +341,13 @@ class SessionManager:
         audio = (session.frozen_audio if timeline and session.timeline_paused else
                  self.audio_provider(session.effect.audio_source, at)
                  if self.audio_provider is not None and session.effect.audio_source is not None else None)
+        has_solo = any(session.solo)
+        gains = tuple(0. if muted or (has_solo and not solo) else gain
+                      for gain, muted, solo in zip(session.gains, session.muted, session.solo))
         for device, position in session.positions.items():
-            frame = Frame(session.id, session.generation, device, session.sequence,
-                          at, session.effect.render(elapsed, position, audio, device))
+            target = session.effect.render(elapsed, position, audio, device, gains)
+            target = replace(target, brightness=target.brightness * session.master_gain)
+            frame = Frame(session.id, session.generation, device, session.sequence, at, target)
             session.latest[device] = frame.sequence
             self._mailboxes[device] = frame
         return len(session.positions)

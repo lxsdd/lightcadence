@@ -8,7 +8,8 @@ import type {Plan,SpatialPath} from "./floorplan";
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
-type Session = {timeline?:{duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string}};
+type MixState={master:number;groups:{gain:number;muted:boolean;solo:boolean}[]};
+type Session = {mix?:MixState;timeline?:{duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number};
@@ -24,7 +25,8 @@ type StopPolicy = "restore" | "hold" | "off";
 type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
 type TimelineControl={op:"timeline_control";instance_id:string;session_id:string;revision:number;action:"pause"|"resume"|"seek";position?:number};
-type Command = TimelineControl | LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type MixControl={op:"mix_control";instance_id:string;session_id:string;revision:number;action:"master"|"gain"|"mute"|"solo";value:number|boolean;index?:number};
+type Command = MixControl | TimelineControl | LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum",static:"Static colour",layered:"Layered scene",timeline:"Timeline Studio"};
@@ -139,6 +141,25 @@ class LightCadencePanel extends LitElement {
     if(!this.snapshot||!s.timeline||s.phase!=="running")return;
     if(action==="seek"&&(position===undefined||!Number.isFinite(position)||position<0||position>s.timeline.duration))return;
     void this.send({op:"timeline_control",instance_id:this.snapshot.instance_id,session_id:s.id,revision:s.revision,action,...(action==="seek"?{position}:{})});
+  }
+  private controlMix(s:Session,action:MixControl["action"],value:number|boolean,index?:number) {
+    if(!this.snapshot||!s.mix||s.phase!=="running")return;
+    if(typeof value==="number"&&(!Number.isFinite(value)||value<0||value>1))return;
+    void this.send({op:"mix_control",instance_id:this.snapshot.instance_id,session_id:s.id,revision:s.revision,action,value,...(index===undefined?{}:{index})});
+  }
+  private renderMixer(s:Session) {
+    const mix=s.mix;
+    if(!mix||s.phase!=="running")return nothing;
+    const disabled=!this.online||this.busy;
+    return html`<details class="live-mixer"><summary>Live mixer</summary>
+      <p>Session only · changes do not save a preset or change device ownership. Mute overrides solo.</p>
+      <label>Master gain <input aria-label="Master gain" type="range" min="0" max="1" step=".01" .value=${String(mix.master)} ?disabled=${disabled} @change=${(e:Event)=>this.controlMix(s,"master",(e.target as HTMLInputElement).valueAsNumber)}><output>${Math.round(mix.master*100)}%</output></label>
+      ${mix.groups.map((g,i)=>html`<div class="mixer-channel"><strong>${s.effect.tracks?.[i]?.name??("Layer "+(i+1)+" · "+(descriptions[s.effect.layers?.[i]?.effect.kind??""]??"Effect"))}</strong>
+        <label>Gain ${i+1} <input aria-label=${"Mix gain "+(i+1)} type="range" min="0" max="1" step=".01" .value=${String(g.gain)} ?disabled=${disabled} @change=${(e:Event)=>this.controlMix(s,"gain",(e.target as HTMLInputElement).valueAsNumber,i)}><output>${Math.round(g.gain*100)}%</output></label>
+        <button aria-pressed=${String(g.muted)} ?disabled=${disabled} @click=${()=>this.controlMix(s,"mute",!g.muted,i)}>${g.muted?"Unmute":"Mute"} ${i+1}</button>
+        <button aria-pressed=${String(g.solo)} ?disabled=${disabled} @click=${()=>this.controlMix(s,"solo",!g.solo,i)}>${g.solo?"Clear solo":"Solo"} ${i+1}</button>
+      </div>`)}
+    </details>`;
   }
   private async send(payload: Command) {
     if(!this.hass || !this.entry || !this.online || this.busy) return;
@@ -323,6 +344,7 @@ class LightCadencePanel extends LitElement {
             <form @submit=${(e:SubmitEvent)=>{e.preventDefault();const input=(e.currentTarget as HTMLFormElement).querySelector("input");if(input)this.controlTimeline(s,"seek",input.valueAsNumber);}}>
             <label>Seek to seconds <input aria-label="Seek to seconds" type="number" required min="0" max=${s.timeline.duration} step="any" ?disabled=${!this.online||this.busy||s.phase!=="running"}></label>
             <button type="submit" ?disabled=${!this.online||this.busy||s.phase!=="running"}>Seek timeline</button></form></div>`:nothing}
+            ${this.renderMixer(s)}
             <div class="targets">${s.devices.map(id=>html`<div class="target"><span class="swatch" style=${"background:"+color(this.snapshot?.targets[id]?.target)}></span><span>${this.name(id)}</span><button title="Remove this lamp from this preview only; other sessions are unaffected" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"detach",session_id:s.id,revision:s.revision,device_id:id})}>Detach</button></div>`)}</div>
             <button class="primary" ?disabled=${!this.online||this.busy||s.timeline?.ending===true} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}

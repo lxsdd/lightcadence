@@ -411,4 +411,31 @@ try {
     assert.equal(await page.evaluate(()=>window.maskCalls[0].effect.auto_end),true);
     await page.close();
   });
+  await test("live mixer sends current revision and instance on mobile",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.mixCalls=[];
+      const state={schema_version:1,instance_id:"mix",output_mode:"preview",physical_output_enabled:false,targets:{},sessions:[{id:"show",zone_id:"Mix test",phase:"running",revision:1,devices:["a"],effect:{kind:"layered",layers:[{effect:{kind:"static"}},{effect:{kind:"scanner"}}]},mix:{master:1,groups:[{gain:1,muted:false,solo:false},{gain:1,muted:false,solo:false}]}}]};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.mixCalls.push(structuredClone(p));const s=state.sessions[0];
+          if(p.action==="master")s.mix.master=p.value;
+          if(p.action==="mute")s.mix.groups[p.index].muted=p.value;
+          if(p.action==="solo")s.mix.groups[p.index].solo=p.value;
+          s.revision++;}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByText("Live mixer",{exact:true}).click();
+    await page.getByRole("button",{name:"Mute 1",exact:true}).click();
+    await page.getByRole("button",{name:"Unmute 1",exact:true}).waitFor();
+    await page.getByRole("button",{name:"Solo 2",exact:true}).click();
+    await page.getByRole("button",{name:"Clear solo 2",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.mixCalls.map(p=>[p.action,p.index,p.revision,p.instance_id])),[["mute",0,1,"mix"],["solo",1,2,"mix"]]);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

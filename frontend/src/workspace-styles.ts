@@ -64,6 +64,10 @@ export const workspaceStyles=css`
   .timeline-controls{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin-block:8px}
   .timeline-controls form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;flex:1 1 15rem;min-width:0}
   .timeline-controls form label{flex:1 1 8rem;min-width:0;margin:0}
+  .live-mixer{margin-block:12px;border:1px solid var(--divider-color,#596273);border-radius:8px;padding:10px}
+  .live-mixer summary{cursor:pointer;min-block-size:44px;align-content:center;font-weight:600}
+  .mixer-channel{margin-block:8px;padding-block:8px;border-block-start:1px solid var(--divider-color,#596273)}
+  .mixer-channel button[aria-pressed="true"]{border-color:var(--primary-color,#237db8);font-weight:bold}
   .target button{flex:0 0 auto}
   .swatch{width:32px;height:32px;flex:none;border:1px solid var(--divider-color,#657080);border-radius:50%}
   /* Do not lock or clip content vertically: the HA page is the scroll owner.

@@ -1,5 +1,7 @@
 import {LitElement, html, nothing} from "lit";
 import {workspaceStyles} from "./workspace-styles";
+import "./floorplan";
+import type {Plan,SpatialPath} from "./floorplan";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
@@ -11,11 +13,11 @@ type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:n
 type PresetEffect={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
 type Zone={id:string;name:string;revision:number;devices:string[]};
 type Scene={id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
-type Library={revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
-type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes";id:string|null;value:Record<string,unknown>|null};
+type Library={floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
+type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes"|"floorplans";id:string|null;value:Record<string,unknown>|null};
 type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
-type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string}};
+type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
 type Command = LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
@@ -46,7 +48,7 @@ function color(t: RGB | undefined): string {
 class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
-    zone:{state:true}, effect:{state:true}, audioSource:{state:true}, selectedZone:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
+    zone:{state:true}, effect:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
     busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
     manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
   };
@@ -58,6 +60,8 @@ class LightCadencePanel extends LitElement {
   declare effect: string;
   declare audioSource:string;
   declare selectedZone:string;
+  declare spatialPath:string;
+  declare floorplanOpen:boolean;
   declare selectedScene:string;
   declare sceneName:string;
   private effectColor=[1,0,0];
@@ -79,7 +83,7 @@ class LightCadencePanel extends LitElement {
   private entry?: string;
   private refreshing = false;
   constructor() {
-    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.audioSource=""; this.selectedZone="";this.selectedScene="";this.sceneName=""; this.period=4;
+    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
     this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
@@ -133,7 +137,8 @@ class LightCadencePanel extends LitElement {
       const state=await this.hass.callWS<Snapshot>({type:physical?"lightcadence/physical":"lightcadence/preview",entry_id:this.entry,payload:command});
       if(epoch!==this.epoch) return;
       this.accept(state);
-      if(payload.op==="library_save"||payload.op==="library_delete"){this.selectedZone="";this.selectedScene="";this.loadedLibraryRevision=-1;}
+      if((payload.op==="library_save"||payload.op==="library_delete")&&payload.kind==="floorplans"){(this.renderRoot.querySelector("lightcadence-floorplan") as (HTMLElement & {confirmed:()=>void})|null)?.confirmed();}
+      if(payload.op==="library_save"||payload.op==="library_delete"){this.spatialPath="";this.selectedZone="";this.selectedScene="";this.loadedLibraryRevision=-1;}
       if(payload.op==="start") this.pendingStart=undefined;
       if(manual) this.pendingManual=undefined;
       if(payload.op==="start") {this.chosen=[]; this.zone="";}
@@ -160,6 +165,12 @@ class LightCadencePanel extends LitElement {
       if(!this.snapshot?.audio_sources?.some(s=>s.id===this.audioSource)) return;
       payload.effect.audio_source=this.audioSource;
     }
+    if(this.spatialPath){
+      if(this.loadedLibraryRevision!==this.snapshot?.library?.revision){this.status="Spatial library changed — reload the zone and path before starting";return;}
+      const path=this.snapshot?.library?.spatial_paths?.find(p=>p.floorplan_id+"/"+p.path_id===this.spatialPath);
+      if(!path?.positions||Object.keys(path.positions).length!==this.chosen.length||!this.chosen.every(d=>Object.prototype.hasOwnProperty.call(path.positions,d))){this.status="Spatial path does not match the selected lamps";return;}
+      payload.positions={...path.positions};
+    }
     if(this.catalog?.physical_output_enabled) {payload.instance_id=this.snapshot?.instance_id;payload.stop_policy=this.stopPolicy;}
     this.pendingStart=payload;
     void this.send(payload);
@@ -168,7 +179,7 @@ class LightCadencePanel extends LitElement {
     const z=this.snapshot?.library?.zones.find(x=>x.id===id);
     if(!z) return;
     if(!z.devices.every(d=>this.catalog?.lights.some(l=>l.id===d))) {this.status="Zone contains missing registry devices";return;}
-    this.loadedLibraryRevision=this.snapshot?.library?.revision??-1;this.selectedZone=z.id;this.zone=z.name;this.chosen=[...z.devices];this.selectedScene="";
+    this.loadedLibraryRevision=this.snapshot?.library?.revision??-1;this.spatialPath="";this.selectedZone=z.id;this.zone=z.name;this.chosen=[...z.devices];this.selectedScene="";
   }
   private loadScene(id:string) {
     const s=this.snapshot?.library?.scenes.find(x=>x.id===id);
@@ -215,6 +226,7 @@ class LightCadencePanel extends LitElement {
     const sources=this.snapshot?.audio_sources??[];
     const lib=this.snapshot?.library;
     const libraryLocked=formLocked||!this.online||!!this.pendingManual||!!lib?.fault;
+    const paths=lib?.spatial_paths?.filter(p=>p.zone_id===this.selectedZone)??[];
     const validZone=!!this.zone.trim()&&this.chosen.length>0;
     const validScene=!!this.sceneName.trim()&&!!lib?.zones.some(z=>z.id===this.selectedZone)&&Number.isFinite(this.period)&&this.period>0&&Number.isFinite(this.brightness)&&this.brightness>=0&&this.brightness<=1;
     return html`
@@ -222,6 +234,8 @@ class LightCadencePanel extends LitElement {
         <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
         <p class="notice">${physical?"Hardware candidate — real lamp commands are enabled for enrolled devices only. Not hardware-qualified. Use explicit LightCadence HA actions for cooperating automations. Ordinary light services and Google Home are not intercepted. Colours are targets, not optical feedback.":"Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback."}</p>
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
+        ${lib?.floorplans?html`<button aria-expanded=${String(this.floorplanOpen)} @click=${()=>this.floorplanOpen=!this.floorplanOpen}>${this.floorplanOpen?"Hide floorplan editor":"Open floorplan editor"}</button>`:nothing}
+        ${lib?.floorplans?html`<section ?hidden=${!this.floorplanOpen} aria-labelledby="floorplan"><h2 id="floorplan">Floorplan editor</h2><lightcadence-floorplan .library=${lib} .lights=${this.catalog?.lights??[]} .instanceId=${this.snapshot?.instance_id??""} .disabled=${libraryLocked} .targetColors=${Object.fromEntries(Object.entries(this.snapshot?.targets??{}).map(([id,v])=>[id,color(v.target)]))} @floorplan-command=${(e:CustomEvent<LibraryCommand>)=>this.send(e.detail)}></lightcadence-floorplan></section>`:nothing}
         <div class="workspace">
           <section aria-labelledby="setup"><h2 id="setup">${physical?"New zone show":"New zone preview"}</h2>
             <label>Zone name <input aria-label="Zone name" title="Label for this independent preview session" .value=${this.zone} ?disabled=${formLocked} @input=${(e:Event)=>this.zone=(e.target as HTMLInputElement).value}></label>
@@ -229,6 +243,7 @@ class LightCadencePanel extends LitElement {
             ${this.effect==="audio_spectrum"?html`<label>Audio source <select aria-label="Audio source" .value=${this.audioSource} ?disabled=${formLocked} @change=${(e:Event)=>this.audioSource=(e.target as HTMLSelectElement).value}><option value="">Select local PCM source</option>${sources.map(s=>html`<option value=${s.id}>${s.name} · ${s.status}</option>`)}</select></label><p>No audio is captured by this panel. Start an authorized local PCM sender first.</p>`:html`<label>Period (seconds) <input type="number" step="any" .value=${String(this.period)} ?disabled=${formLocked} @input=${(e:Event)=>this.period=(e.target as HTMLInputElement).valueAsNumber}></label>`}
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
             ${physical?html`<label>Stop behaviour <select .value=${this.stopPolicy} ?disabled=${formLocked} @change=${(e:Event)=>this.stopPolicy=(e.target as HTMLSelectElement).value as StopPolicy}><option value="restore">Restore original state</option><option value="hold">Hold last state</option><option value="off">Turn off</option></select></label>`:nothing}
+            ${paths.length?html`<label>Spatial effect path <select aria-label="Spatial effect path" .value=${this.spatialPath} ?disabled=${formLocked} @change=${(e:Event)=>this.spatialPath=(e.target as HTMLSelectElement).value}><option value="">Ordered lamps</option>${paths.map(p=>html`<option value=${p.floorplan_id+"/"+p.path_id} ?disabled=${!p.positions}>${p.name}${p.positions?"":" · missing placements"}</option>`)}</select></label>`:nothing}
             <h3>Lamps · ${this.chosen.length} selected</h3>
             ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||blocked.has(l.id)||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${blocked.has(l.id)?"Recovery required":locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
             <button class="primary" ?disabled=${!this.online||this.busy||fault||this.chosen.some(id=>blocked.has(id))||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)||(this.effect==="audio_spectrum"&&!sources.some(s=>s.id===this.audioSource))))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>

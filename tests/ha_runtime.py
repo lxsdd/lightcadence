@@ -294,6 +294,33 @@ async def main():
                         snapshot = started["result"]["sessions"][0]
                         assert set(snapshot["devices"]) == {a.id, b.id}
                         assert started["result"]["physical_output_enabled"] is False
+                        # Geometry and zones use the original admin bridge and
+                        # stable registry references, including renamed lights.
+                        instance = empty["result"]["instance_id"]
+                        saved = await command(ws, 11, "lightcadence/preview", entry_id=entry_id,
+                            payload={"op": "library_save", "instance_id": instance, "revision": 0,
+                                     "kind": "zones", "id": None, "value": {"name": "Synthetic spatial zone", "devices": [a.id, b.id]}})
+                        assert saved["success"], saved
+                        zid = saved["result"]["library"]["zones"][0]["id"]
+                        def feature(id, kind, points, device=None, zone=None):
+                            return {"id": id, "kind": kind, "name": id, "points": points,
+                                    "device_id": device, "zone_id": zone}
+                        floor = {"op": "library_save", "instance_id": instance, "revision": 1, "kind": "floorplans",
+                                 "id": None, "value": {"name": "Synthetic floor", "width": 10, "height": 8,
+                                 "features": [feature("a", "lamp", [[0,0]], a.id),
+                                              feature("b", "lamp", [[8,0]], b.id),
+                                              feature("path", "effect_path", [[0,0],[10,0]], zone=zid)]}}
+                        for n, bad in enumerate((disabled.id, hidden.id, sensor.id, "unknown")):
+                            invalid = {**floor, "value": {**floor["value"], "features":
+                                [feature("bad", "lamp", [[0,0]], bad)]}}
+                            denied = await command(ws, 12+n, "lightcadence/preview", entry_id=entry_id, payload=invalid)
+                            assert not denied["success"] and denied["error"]["code"] == "invalid_selection", denied
+                        saved = await command(ws, 16, "lightcadence/preview", entry_id=entry_id, payload=floor)
+                        assert saved["success"], saved
+                        assert saved["result"]["library"]["spatial_paths"][0]["positions"] == {a.id: 0., b.id: .8}
+                        assert saved["result"]["sessions"] == [snapshot]
+                        stale = await command(ws, 17, "lightcadence/preview", entry_id=entry_id, payload=floor)
+                        assert not stale["success"] and stale["error"]["code"] == "stale_revision", stale
                     async with await auth(session, ordinary) as ws:
                         panels = await command(ws, 1, "get_panels")
                         assert "lightcadence" not in panels["result"]
@@ -302,6 +329,7 @@ async def main():
                             (3, "lightcadence/state", {"entry_id": entry_id}),
                             (4, "lightcadence/preview", {"entry_id": entry_id, "payload": payload}),
                             (5, "lightcadence/physical", {"entry_id": entry_id, "payload": payload}),
+                            (6, "lightcadence/preview", {"entry_id": entry_id, "payload": floor}),
                         ]:
                             denied = await command(ws, i, kind, **args)
                             assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied

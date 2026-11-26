@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from .chroma import _unique_pairs
 from .effects import Effect, EffectKind
 from .sessions import StaleRevision, StopPolicy
+from .spatial import geometry, spatial_paths
 
 
 def exact(obj, keys):
@@ -53,7 +54,7 @@ class ProjectLibrary:
         self.directory = Path(directory) if directory is not None else None
         self.lock = None
         self.fault = False
-        self.data = {"schema_version": 1, "revision": 0, "zones": [], "scenes": []}
+        self.data = {"schema_version": 1, "revision": 0, "zones": [], "scenes": [], "floorplans": []}
         if self.directory is not None:
             try:
                 self.lock = os.open(self.directory / "library.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -63,6 +64,9 @@ class ProjectLibrary:
                     raise ValueError("invalid library path")
                 if self.path.exists():
                     self.data = json.loads(self.path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
+                    # Additive v1 extension: only the exact old document shape is migrated.
+                    if isinstance(self.data, dict) and set(self.data) == {"schema_version", "revision", "zones", "scenes"}:
+                        self.data["floorplans"] = []
                     self.validate(self.data)
             except BaseException:
                 self.close()
@@ -70,17 +74,17 @@ class ProjectLibrary:
 
     @staticmethod
     def validate(doc):
-        exact(doc, ("schema_version", "revision", "zones", "scenes"))
+        exact(doc, ("schema_version", "revision", "zones", "scenes", "floorplans"))
         if type(doc["schema_version"]) is not int or doc["schema_version"] != 1 or type(doc["revision"]) is not int or doc["revision"] < 0:
             raise ValueError("invalid library version")
         ids = set()
         zones = set()
-        for kind in ("zones", "scenes"):
+        for kind in ("zones", "scenes", "floorplans"):
             if not isinstance(doc[kind], list):
                 raise ValueError("invalid library collection")
             for obj in doc[kind]:
                 keys = ("schema_version", "id", "revision", "updated_at", "name")
-                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy")))
+                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") if kind == "scenes" else ("width", "height", "features")))
                 if (type(obj["schema_version"]) is not int or obj["schema_version"] != 1 or
                         type(obj["revision"]) is not int or obj["revision"] < 1 or
                         not isinstance(obj["id"], str) or str(UUID(obj["id"])) != obj["id"] or obj["id"] in ids):
@@ -92,14 +96,17 @@ class ProjectLibrary:
                 if kind == "zones":
                     members(obj["devices"])
                     zones.add(obj["id"])
-                else:
+                elif kind == "scenes":
                     if obj["zone_id"] not in zones:
                         raise ValueError("unknown zone reference")
                     effect(obj["effect"])
                     StopPolicy(obj["stop_policy"])
+                else:
+                    geometry(obj, zones)
 
     def snapshot(self):
-        return {**deepcopy(self.data), "persistent": self.directory is not None, "fault": self.fault}
+        return {**deepcopy(self.data), "persistent": self.directory is not None, "fault": self.fault,
+                "spatial_paths": spatial_paths(self.data["floorplans"], self.data["zones"])}
 
     def command(self, body):
         exact(body, ("op", "revision", "kind", "id", "value"))
@@ -108,7 +115,7 @@ class ProjectLibrary:
         if type(body["revision"]) is not int or body["revision"] != self.data["revision"]:
             raise StaleRevision("refresh library")
         kind = body["kind"]
-        if kind not in ("zones", "scenes"):
+        if kind not in ("zones", "scenes", "floorplans"):
             raise ValueError("unknown library collection")
         doc = deepcopy(self.data)
         rows = doc[kind]
@@ -125,10 +132,14 @@ class ProjectLibrary:
             if kind == "zones":
                 exact(value, ("name", "devices"))
                 item = {"name": name(value["name"]), "devices": members(value["devices"])}
-            else:
+            elif kind == "scenes":
                 exact(value, ("name", "zone_id", "effect", "stop_policy"))
                 item = {"name": name(value["name"]), "zone_id": value["zone_id"],
                         "effect": effect(value["effect"]), "stop_policy": StopPolicy(value["stop_policy"]).value}
+            else:
+                exact(value, ("name", "width", "height", "features"))
+                item = deepcopy(value)
+                item["name"] = name(item["name"])
             item.update(schema_version=1, id=key or str(uuid4()), revision=1 if old is None else old["revision"] + 1,
                         updated_at=datetime.now(timezone.utc).isoformat())
             if old is None:

@@ -249,4 +249,44 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.libraryCalls.map(x=>x.op)),["library_save","library_save","start"]);
     await page.close();
   });
+  await test("floor drawing and spatial start use original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.spatialCalls=[];
+      const state={schema_version:1,instance_id:"spatial",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:1,zones:[{id:"zone",name:"Synthetic zone",devices:["a","b"]}],scenes:[],floorplans:[],spatial_paths:[],persistent:false,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+        if(msg.payload){const p=msg.payload;window.spatialCalls.push(structuredClone(p));if(p.kind==="floorplans"){state.library.floorplans=[{...p.value,id:"floor",revision:1}];state.library.revision++;state.library.spatial_paths=[{floorplan_id:"floor",path_id:"path",name:"Test path",zone_id:"zone",positions:{a:0,b:.8},missing:[]}];}else if(p.op==="start"){state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];}}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Open floorplan editor"}).click();
+    await page.getByLabel("Floor name",{exact:true}).fill("Test floor");
+    await page.getByLabel("Geometry name",{exact:true}).fill("Room");
+    const surface=page.locator('svg[aria-label="Floor drawing surface"]');
+    await surface.scrollIntoViewIfNeeded();
+    const rect=await surface.boundingBox();
+    for(const [x,y] of [[.2,.2],[.8,.2],[.8,.8],[.2,.8]])await page.mouse.click(rect.x+rect.width*x,rect.y+rect.height*y);
+    await page.getByRole("button",{name:"Finish geometry"}).click();
+    await page.getByRole("button",{name:"Undo",exact:true}).click();
+    await page.getByRole("button",{name:"Redo",exact:true}).click();
+    await page.getByLabel("Selected geometry",{exact:true}).selectOption({label:"Room"});
+    await page.getByLabel("Vertex 1 X",{exact:true}).fill("1.5");
+    await page.getByLabel("Vertex 1 X",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Save floor",exact:true}).click();
+    await page.getByText("Floor library updated.",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.spatialCalls[0].value.features[0].points.length),4);
+    assert.equal(await page.evaluate(()=>window.spatialCalls[0].value.features[0].points[0][0]),1.5);
+    await page.getByRole("button",{name:"Hide floorplan editor"}).click();
+    await page.getByLabel("Saved zone",{exact:true}).selectOption("zone");
+    await page.getByLabel("Spatial effect path",{exact:true}).selectOption("floor/path");
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Synthetic zone",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.spatialCalls.at(-1).positions),{a:0,b:.8});
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

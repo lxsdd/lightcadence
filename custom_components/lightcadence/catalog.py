@@ -68,6 +68,14 @@ def validate_preview_selection(hass, payload):
     if payload.get("op") == "library_save" and payload.get("kind") == "zones":
         value = payload.get("value")
         devices = value.get("devices") if isinstance(value, dict) else None
+    elif payload.get("op") == "library_save" and payload.get("kind") == "floorplans":
+        value = payload.get("value")
+        features = value.get("features") if isinstance(value, dict) else None
+        if not isinstance(features, list) or not all(isinstance(f, dict) for f in features):
+            raise ValueError("invalid geometry")
+        devices = [f.get("device_id") for f in features if f.get("kind") in ("lamp", "strip")]
+        if not devices:
+            return
     elif payload.get("op") == "start":
         devices = payload.get("devices")
     else:

@@ -12,6 +12,7 @@ export const workspaceStyles=css`
     font-family:inherit;
   }
   *, *::before, *::after {box-sizing:border-box}
+  [hidden]{display:none!important}
   main {
     display:flex; flex-direction:column; inline-size:100%; min-inline-size:0;
     padding:clamp(10px,2cqi,32px); gap:clamp(10px,1.3cqi,20px);

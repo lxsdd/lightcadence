@@ -320,4 +320,38 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.layerCalls[0].effect.layers.map(l=>[l.effect.kind,l.blend])),[["scanner","add"],["static","over"]]);
     await page.close();
   });
+  await test("timeline tracks clips keyframes and original explicit start",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.timelineCalls=[];
+      const state={schema_version:1,instance_id:"timeline",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.timelineCalls.push(structuredClone(msg.payload));state.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect,timeline:{duration:6,playhead:2,ended:false,loop:true}}];}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Timeline test");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByLabel("Clip duration",{exact:true}).fill("6");
+    await page.getByLabel("Clip duration",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Add keyframe",exact:true}).click();
+    await page.getByLabel("Key 1 value",{exact:true}).fill(".2");
+    await page.getByLabel("Key 1 value",{exact:true}).press("Tab");
+    assert.equal(await page.evaluate(()=>window.timelineCalls.length),0);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Timeline test",exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.timelineCalls[0].effect.tracks[0].clips[0].duration),6);
+    assert.equal(await page.evaluate(()=>window.timelineCalls[0].effect.tracks[0].clips[0].keyframes[0].value),.2);
+    await page.getByText("Timeline · 2.00 / 6.00 s · Looping",{exact:true}).waitFor();
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

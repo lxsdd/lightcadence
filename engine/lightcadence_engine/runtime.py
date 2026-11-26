@@ -81,11 +81,22 @@ class PreviewRuntime:
             "instance_id": self.instance_id,
             "output_mode": "preview",
             "physical_output_enabled": False,
-            "sessions": [asdict(s) for s in self.manager.snapshots()],
+            "sessions": [self.session_state(s) for s in self.manager.snapshots()],
             "targets": self.targets,
             "audio_sources": self.audio.snapshot(),
             "library": self.library.snapshot(),
         }
+
+    def session_state(self, session):
+        result = asdict(session)
+        if session.effect.kind.value == "timeline" and session.phase is not Phase.STOPPED:
+            duration = session.effect.duration
+            elapsed = max(0., self.clock() - session.started_at)
+            result["timeline"] = {"duration": duration,
+                                  "playhead": elapsed % duration if session.effect.loop else min(elapsed, duration),
+                                  "ended": not session.effect.loop and elapsed >= duration,
+                                  "loop": session.effect.loop}
+        return result
 
     def command(self, body):
         if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):

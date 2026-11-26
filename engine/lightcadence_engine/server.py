@@ -91,8 +91,8 @@ def create_app(token, runtime=None):
             if not isinstance(body, dict) or body.get("instance_id") != runtime.instance_id:
                 return error("stale_instance", 409)
             if body.get("op") == "open":
-                fields(body, ("op", "instance_id", "name"))
-                source = runtime.audio.open(body["name"])
+                fields(body, ("op", "instance_id", "name"), ("kind", "clock_mapping"))
+                source = runtime.audio.open(body["name"], body.get("kind", "stdin"), body.get("clock_mapping", "arrival_only"))
                 return web.json_response({"source_id": source, "sample_rate": SAMPLE_RATE,
                                           "frame_samples": FRAME_SAMPLES, "format": "s16le_mono"})
             if body.get("op") == "close":
@@ -112,7 +112,9 @@ def create_app(token, runtime=None):
             if request.content_length != FRAME_BYTES:
                 raise ValueError
             sequence = int(request.query["sequence"])
-            runtime.audio.push(request.match_info["source"], sequence, await request.read())
+            stamp = request.query.get("read_time")
+            runtime.audio.push(request.match_info["source"], sequence, await request.read(),
+                               None if stamp is None else float(stamp))
         except (ValueError, TypeError, OverflowError, KeyError):
             return error("invalid_audio_frame", 400)
         return web.json_response({"accepted": True})

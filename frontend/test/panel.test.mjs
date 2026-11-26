@@ -194,7 +194,7 @@ try {
       await customElements.whenDefined("lightcadence-panel");
       const el=document.querySelector("lightcadence-panel");
       window.audioCalls=[];
-      const s={schema_version:1,instance_id:"audio",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},audio_sources:[{id:"pcm",name:"Local PCM",status:"live",bands:[.4,.2,.1],bpm:120,beat_count:4}]};
+      const s={schema_version:1,instance_id:"audio",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},audio_sources:[{id:"pcm",name:"Local PCM",status:"live",bands:[.4,.2,.1],bpm:120,beat_count:4,kind:"pulse_monitor",clock_mapping:"local_read_monotonic",read_to_engine_seconds:.015,transport_jitter_seconds:.002}]};
       window.audioFixture=s;
       el.hass={callWS:async msg=>{
         if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
@@ -203,6 +203,7 @@ try {
       }};
     });
     await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByText("Digital monitor · Local read clock · Read-to-engine 15 ms · Transport jitter 2 ms",{exact:true}).waitFor();
     await page.getByRole("textbox",{name:"Zone name"}).fill("Music");
     await page.getByRole("checkbox").check();
     await page.getByLabel("Effect",{exact:true}).selectOption("audio_spectrum");

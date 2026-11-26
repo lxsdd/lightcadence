@@ -76,6 +76,11 @@ class Analyzer:
 class _Source:
     name: str
     analyzer: Analyzer
+    kind: str = "stdin"
+    clock_mapping: str = "arrival_only"
+    read_time: float | None = None
+    transit_seconds: float | None = None
+    jitter_seconds: float | None = None
     sequence: int = -1
     source_time: float | None = None
     arrival: float | None = None
@@ -93,11 +98,14 @@ class AudioHub:
         self.clock = clock
         self.sources = {}
 
-    def open(self, name):
+    def open(self, name, kind="stdin", clock_mapping="arrival_only"):
         if not isinstance(name, str) or not name.strip() or len(name) > 128:
             raise ValueError("invalid audio source name")
+        if (kind, clock_mapping) not in (("stdin", "arrival_only"), ("pulse_monitor", "local_read_monotonic"),
+                                         ("pulse_microphone", "local_read_monotonic")):
+            raise ValueError("unsupported source clock or kind")
         source = str(uuid4())
-        self.sources[source] = _Source(name.strip(), Analyzer())
+        self.sources[source] = _Source(name.strip(), Analyzer(), kind, clock_mapping)
         return source
 
     def close(self, source):
@@ -105,7 +113,7 @@ class AudioHub:
             raise ValueError("unknown audio source")
         del self.sources[source]
 
-    def push(self, source, sequence, pcm):
+    def push(self, source, sequence, pcm, read_time=None):
         s = self.sources.get(source)
         if s is None or type(sequence) is not int or sequence < 0 or sequence <= s.sequence:
             raise ValueError("unknown source or stale audio sequence")
@@ -114,12 +122,31 @@ class AudioHub:
         now = self.clock()
         if s.arrival is not None and now < s.arrival:
             raise ValueError("nonmonotonic arrival")
+        if s.clock_mapping == "local_read_monotonic":
+            if (type(read_time) not in (int, float) or not isfinite(read_time) or
+                    read_time < 0 or read_time > now or now - read_time > FRESH_SECONDS or
+                    (s.read_time is not None and read_time < s.read_time)):
+                raise ValueError("invalid or stale local read clock")
+            transit = now - read_time
+        elif read_time is not None:
+            raise ValueError("unexpected local read clock")
+        else:
+            transit = None
         source_time = sequence * FRAME_SAMPLES / SAMPLE_RATE
         if not isfinite(source_time):
             raise ValueError("invalid source clock")
-        if sequence != s.sequence + 1 or (s.arrival is not None and now - s.arrival > FRESH_SECONDS):
+        if (sequence != s.sequence + 1 or (s.arrival is not None and now - s.arrival > FRESH_SECONDS)
+                or (s.read_time is not None and read_time - s.read_time > FRESH_SECONDS)):
             s.analyzer = Analyzer()
         features = s.analyzer.analyze(pcm, source_time)
+        if transit is not None:
+            if s.transit_seconds is not None and sequence == s.sequence + 1 and now - s.arrival <= FRESH_SECONDS:
+                delta = abs(transit - s.transit_seconds)
+                s.jitter_seconds = delta if s.jitter_seconds is None else .875 * s.jitter_seconds + .125 * delta
+            else:
+                s.jitter_seconds = None
+            s.transit_seconds = transit
+            s.read_time = read_time
         s.sequence, s.source_time, s.arrival, s.features = sequence, source_time, now, features
         s.beats += int(features.beat)
 
@@ -127,14 +154,16 @@ class AudioHub:
         s = self.sources.get(source)
         if s is None or s.arrival is None or s.features is None:
             return AMBIENT
-        fade = max(0., min(1., (at - s.arrival - FRESH_SECONDS) / FADE_SECONDS))
+        timestamp = s.read_time if s.read_time is not None else s.arrival
+        fade = max(0., min(1., (at - timestamp - FRESH_SECONDS) / FADE_SECONDS))
         return tuple(v * (1 - fade) + base * fade for v, base in zip(s.features.bands, AMBIENT))
 
     def snapshot(self):
         now = self.clock()
         result = []
         for source, s in self.sources.items():
-            age = None if s.arrival is None else max(0., now - s.arrival)
+            timestamp = s.read_time if s.read_time is not None else s.arrival
+            age = None if timestamp is None else max(0., now - timestamp)
             live = age is not None and age <= FRESH_SECONDS
             f = s.features if live else None
             result.append({"id": source, "name": s.name, "status": "live" if live else
@@ -142,5 +171,8 @@ class AudioHub:
                            "source_time": s.source_time, "age_seconds": age,
                            "rms": f.rms if f else None, "bands": list(f.bands) if f else None,
                            "beat_count": s.beats, "bpm": f.bpm if f else None,
-                           "clock_mapping": "arrival_only"})
+                           "kind": s.kind, "clock_mapping": s.clock_mapping,
+                           "read_to_engine_seconds": s.transit_seconds if live else None,
+                           "transport_jitter_seconds": s.jitter_seconds if live else None,
+                           "playback_clock_verified": False})
         return result

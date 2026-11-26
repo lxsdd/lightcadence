@@ -438,4 +438,47 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.mixCalls.map(p=>[p.action,p.index,p.revision,p.instance_id])),[["mute",0,1,"mix"],["solo",1,2,"mix"]]);
     await page.close();
   });
+  await test("musical timebase tempo map and marker seek through original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.tempoCalls=[];
+      const state={schema_version:1,instance_id:"tempo",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.tempoCalls.push(structuredClone(p));
+          if(p.op==="start")state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect,timeline:{duration:6,playhead:0,ended:false,loop:true,beat:0,duration_beats:8,markers:[{name:"Bridge",time:4,seconds:2}]}}];
+          else if(p.op==="timeline_control"){state.sessions[0].revision++;state.sessions[0].timeline.playhead=p.position;}
+        }
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Musical timeline");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    await page.getByLabel("Timeline timebase",{exact:true}).selectOption("beats");
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByLabel("Clip duration",{exact:true}).fill("8");
+    await page.getByLabel("Clip duration",{exact:true}).press("Tab");
+    assert.equal(await page.getByLabel("Timeline timebase",{exact:true}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add tempo change",exact:true}).click();
+    await page.getByLabel("Tempo 2 BPM",{exact:true}).fill("60");
+    await page.getByLabel("Tempo 2 BPM",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Add marker",exact:true}).click();
+    await page.getByLabel("Marker 1 name",{exact:true}).fill("Bridge");
+    await page.getByLabel("Marker 1 time",{exact:true}).fill("4");
+    await page.getByLabel("Marker 1 time",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Musical timeline",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.tempoCalls[0].effect.tempo_map),[{beat:0,bpm:120},{beat:4,bpm:60}]);
+    assert.deepEqual(await page.evaluate(()=>window.tempoCalls[0].effect.markers),[{time:4,name:"Bridge"}]);
+    await page.getByRole("button",{name:"Seek marker: Bridge",exact:true}).click();
+    await page.waitForFunction(()=>window.tempoCalls.length===2);
+    assert.equal(await page.evaluate(()=>window.tempoCalls[1].position),2);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

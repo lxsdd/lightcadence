@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import cos, isfinite, pi
 import colorsys
+from .tempo import TempoMap, Marker, decode_tempo, decode_markers, number
 
 
 def linear_channel(channel: int) -> float:
@@ -49,6 +50,8 @@ class Effect:
     tracks: tuple['Track', ...] = ()
     loop: bool = True
     auto_end: bool = False
+    tempo_map: TempoMap | None = None
+    markers: tuple[Marker, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.kind, EffectKind):
@@ -69,12 +72,31 @@ class Effect:
             raise ValueError("invalid timeline")
         if type(self.auto_end) is not bool or (self.auto_end and (self.kind is not EffectKind.TIMELINE or self.loop)):
             raise ValueError("automatic stop requires a one-shot timeline")
+        if not isinstance(self.markers, tuple) or not all(
+                isinstance(m, Marker) and number(m.time) and m.time >= 0
+                and isinstance(m.name, str) and m.name.strip() for m in self.markers):
+            raise ValueError("invalid markers")
+        if any(a.time >= b.time for a,b in zip(self.markers,self.markers[1:])):
+            raise ValueError("markers must be strictly ordered")
+        if self.tempo_map is not None and not isinstance(self.tempo_map, TempoMap):
+            raise ValueError("invalid tempo map")
+        if self.kind is not EffectKind.TIMELINE and (self.tempo_map is not None or self.markers):
+            raise ValueError("musical timing requires timeline")
         if self.kind is EffectKind.TIMELINE:
             if not self.tracks or not any(t.clips for t in self.tracks) or self.layers:
                 raise ValueError("timeline requires clips, not layers")
             if any(c.layer.effect.audio_source is not None and c.layer.effect.audio_source != self.audio_source
                    for t in self.tracks for c in t.clips):
                 raise ValueError("one audio source per show")
+            if any(m.time > self.authored_duration for m in self.markers):
+                raise ValueError("marker outside timeline")
+            if self.tempo_map is not None:
+                for t in self.tracks:
+                    for c in t.clips:
+                        if self.seconds(c.start+c.duration) <= self.seconds(c.start):
+                            raise ValueError("unrepresentable clip duration")
+                if self.tempo_map.points[-1].beat > self.authored_duration:
+                    raise ValueError("tempo point outside timeline")
             needs_audio = any(c.layer.effect.kind is EffectKind.AUDIO_SPECTRUM for t in self.tracks for c in t.clips)
         elif self.tracks or self.loop is not True:
             raise ValueError("timeline fields require timeline effect")
@@ -95,8 +117,18 @@ class Effect:
             raise ValueError("audio source is only valid for audio effects")
 
     @property
-    def duration(self):
+    def authored_duration(self):
         return max((c.start + c.duration for t in self.tracks for c in t.clips), default=0.)
+
+    def seconds(self, at):
+        return self.tempo_map.seconds(at) if self.tempo_map is not None else at
+
+    def authored_time(self, seconds):
+        return self.tempo_map.beat(seconds) if self.tempo_map is not None else seconds
+
+    @property
+    def duration(self):
+        return self.seconds(self.authored_duration)
 
     def validate_targets(self, devices):
         selected = set(devices)
@@ -121,7 +153,8 @@ class Effect:
             # Explicit Stop uses the existing confirmed stop/restore path.
             if not self.loop and elapsed >= duration:
                 return LightTarget(0., 0., 0., 0.)
-            at = elapsed % duration if self.loop else elapsed
+            seconds = elapsed % duration if self.loop else elapsed
+            at = self.authored_time(seconds)
             rgb = (0., 0., 0.)
             for index, track in enumerate(self.tracks):
                 gain = 1. if group_gains is None else group_gains[index]
@@ -132,7 +165,7 @@ class Effect:
                 for clip in track.clips:
                     local = at - clip.start
                     if 0 <= local < clip.duration:
-                        target = clip.layer.effect.render(local, position, audio)
+                        target = clip.layer.effect.render(max(0., seconds - self.seconds(clip.start)), position, audio)
                         rgb = blend_linear(rgb, target, clip.level(local) * gain, clip.layer.blend)
             peak = max(rgb)
             return LightTarget(*(v / peak if peak else 0. for v in rgb), peak * self.brightness)
@@ -294,7 +327,7 @@ def blend_linear(base, target, opacity, blend):
 def decode_effect(value, *, template=False):
     """Shared API/preset parser. Persisted presets never contain live source IDs."""
     base = {"kind", "period_seconds", "brightness", "color", "width"}
-    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"layers", "tracks", "loop", "auto_end"} | (set() if template else {"audio_source"}):
+    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"layers", "tracks", "loop", "auto_end", "tempo_map", "markers"} | (set() if template else {"audio_source"}):
         raise ValueError("invalid effect fields")
     if template and not base <= value.keys():
         raise ValueError("incomplete preset")
@@ -304,7 +337,9 @@ def decode_effect(value, *, template=False):
     raw_tracks = params.pop("tracks", None)
     loop = params.pop("loop", True)
     auto_end = params.pop("auto_end", False)
-    if kind is not EffectKind.TIMELINE and ("tracks" in value or "loop" in value or "auto_end" in value):
+    tempo_map = decode_tempo(params.pop("tempo_map")) if "tempo_map" in params else None
+    markers = decode_markers(params.pop("markers")) if "markers" in params else ()
+    if kind is not EffectKind.TIMELINE and any(k in value for k in ("tracks", "loop", "auto_end", "tempo_map", "markers")):
         raise ValueError("timeline fields require timeline effect")
     if "color" in params:
         if not isinstance(params["color"], list):
@@ -342,7 +377,7 @@ def decode_effect(value, *, template=False):
                 clips.append(Clip(raw["start"], raw["duration"], Layer(decode_effect(child), layer["opacity"], Blend(layer["blend"])),
                                   raw["fade_in"], raw["fade_out"], tuple(keys)))
             tracks.append(Track(track["name"], tuple(clips), decode_mask(track)))
-        params.update(tracks=tuple(tracks), loop=loop, auto_end=auto_end, audio_source=source)
+        params.update(tracks=tuple(tracks), loop=loop, auto_end=auto_end, audio_source=source, tempo_map=tempo_map, markers=markers)
     elif kind is EffectKind.LAYERED:
         if not isinstance(raw_layers, list) or not raw_layers:
             raise ValueError("select layers")
@@ -375,6 +410,10 @@ def encode_preset(spec):
                              "blend": layer.blend.value, **({"devices": list(layer.devices)} if layer.devices is not None else {})} for layer in spec.layers]
     if spec.kind is EffectKind.TIMELINE:
         result["loop"] = spec.loop
+        if spec.tempo_map is not None:
+            result["tempo_map"] = [p._asdict() for p in spec.tempo_map.points]
+        if spec.markers:
+            result["markers"] = [m._asdict() for m in spec.markers]
         if spec.auto_end:
             result["auto_end"] = True
         result["tracks"] = [{"name": t.name, **({"devices": list(t.devices)} if t.devices is not None else {}), "clips": [{"start": c.start, "duration": c.duration,

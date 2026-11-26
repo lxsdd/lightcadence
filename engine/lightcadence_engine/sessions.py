@@ -236,9 +236,17 @@ class SessionManager:
             return None
         duration = session.effect.duration
         elapsed = self._timeline_elapsed(session, self._clock())
-        return {"duration": duration, "playhead": elapsed % duration if session.effect.loop else elapsed,
-                "ended": not session.effect.loop and elapsed >= duration, "loop": session.effect.loop,
-                "paused": session.timeline_paused}
+        playhead = elapsed % duration if session.effect.loop else elapsed
+        result = {"duration": duration, "playhead": playhead,
+                  "ended": not session.effect.loop and elapsed >= duration, "loop": session.effect.loop,
+                  "paused": session.timeline_paused}
+        if session.effect.tempo_map is not None:
+            result.update(beat=session.effect.authored_time(playhead),
+                          duration_beats=session.effect.authored_duration)
+        if session.effect.markers:
+            result["markers"] = [{"name": m.name, "time": m.time,
+                                  "seconds": session.effect.seconds(m.time)} for m in session.effect.markers]
+        return result
 
     def auto_end_due(self, session_id, at):
         session = self._get(session_id)

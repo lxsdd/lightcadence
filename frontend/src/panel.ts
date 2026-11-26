@@ -2,27 +2,28 @@ import {LitElement, html, nothing} from "lit";
 import {workspaceStyles} from "./workspace-styles";
 import "./floorplan";
 import "./timeline";
-import type {Track} from "./timeline";
+import {validTiming} from "./timeline";
+import type {Track,Timing} from "./timeline";
 import type {Plan,SpatialPath} from "./floorplan";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type MixState={master:number;groups:{gain:number;muted:boolean;solo:boolean}[]};
-type Session = {mix?:MixState;timeline?:{duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
+type Session = {mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number};
 type LeafEffect={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
 type Layer={effect:LeafEffect;opacity:number;blend:"over"|"add"|"max";devices?:string[]};
-type PresetEffect=LeafEffect & {layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean};
+type PresetEffect=LeafEffect & Timing & {layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean};
 type Zone={id:string;name:string;revision:number;devices:string[]};
 type Scene={id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
 type Library={floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
 type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes"|"floorplans";id:string|null;value:Record<string,unknown>|null};
 type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
-type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean}};
+type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: Timing & {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
 type TimelineControl={op:"timeline_control";instance_id:string;session_id:string;revision:number;action:"pause"|"resume"|"seek";position?:number};
 type MixControl={op:"mix_control";instance_id:string;session_id:string;revision:number;action:"master"|"gain"|"mute"|"solo";value:number|boolean;index?:number};
@@ -55,7 +56,7 @@ function color(t: RGB | undefined): string {
 class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
-    zone:{state:true}, effect:{state:true},layers:{state:true}, tracks:{state:true},timelineLoop:{state:true},timelineAutoEnd:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
+    zone:{state:true}, effect:{state:true},layers:{state:true}, tracks:{state:true},timing:{state:true},timelineLoop:{state:true},timelineAutoEnd:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
     busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
     manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
   };
@@ -67,6 +68,7 @@ class LightCadencePanel extends LitElement {
   declare effect: string;
   declare layers:Layer[];
   declare tracks:Track[];
+  declare timing:Timing;
   declare timelineLoop:boolean;
   declare timelineAutoEnd:boolean;
   declare audioSource:string;
@@ -94,7 +96,7 @@ class LightCadencePanel extends LitElement {
   private entry?: string;
   private refreshing = false;
   constructor() {
-    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
+    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timing={};this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
     this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
@@ -197,7 +199,7 @@ class LightCadencePanel extends LitElement {
     const payload:Start={op:"start",request_id:requestId(),zone_id:this.zone.trim(),devices:[...this.chosen],
       effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth}};
     if(this.effect==="layered") {if(!this.validLayers())return;payload.effect.layers=structuredClone(this.layers);}
-    if(this.effect==="timeline"){if(!this.validTimeline())return;payload.effect.tracks=structuredClone(this.tracks);payload.effect.loop=this.timelineLoop;if(!this.timelineLoop&&this.timelineAutoEnd)payload.effect.auto_end=true;}
+    if(this.effect==="timeline"){if(!this.validTimeline())return;payload.effect.tracks=structuredClone(this.tracks);payload.effect.loop=this.timelineLoop;Object.assign(payload.effect,structuredClone(this.timing));if(!this.timelineLoop&&this.timelineAutoEnd)payload.effect.auto_end=true;}
     if(this.needsAudio()) {
       if(!this.snapshot?.audio_sources?.some(s=>s.id===this.audioSource)) return;
       payload.effect.audio_source=this.audioSource;
@@ -222,7 +224,7 @@ class LightCadencePanel extends LitElement {
     const s=this.snapshot?.library?.scenes.find(x=>x.id===id);
     const z=this.snapshot?.library?.zones.find(x=>x.id===s?.zone_id);
     if(!s||!z||!z.devices.every(d=>this.catalog?.lights.some(l=>l.id===d))) {this.status="Scene contains missing registry devices";return;}
-    this.loadZone(z.id);this.selectedScene=s.id;this.sceneName=s.name;this.effect=s.effect.kind;this.layers=structuredClone(s.effect.layers??[]);this.tracks=structuredClone(s.effect.tracks??[]);this.timelineLoop=s.effect.loop??true;this.timelineAutoEnd=s.effect.auto_end??false;
+    this.loadZone(z.id);this.selectedScene=s.id;this.sceneName=s.name;this.effect=s.effect.kind;this.layers=structuredClone(s.effect.layers??[]);this.tracks=structuredClone(s.effect.tracks??[]);this.timing={...(s.effect.tempo_map?{tempo_map:structuredClone(s.effect.tempo_map)}:{}),...(s.effect.markers?{markers:structuredClone(s.effect.markers)}:{})};this.timelineLoop=s.effect.loop??true;this.timelineAutoEnd=s.effect.auto_end??false;
     this.effectColor=[...s.effect.color];this.effectWidth=s.effect.width;this.period=s.effect.period_seconds;this.brightness=s.effect.brightness;this.stopPolicy=s.stop_policy;this.audioSource="";
   }
   private libraryWrite(kind:"zones"|"scenes",remove=false,create=false) {
@@ -233,11 +235,11 @@ class LightCadencePanel extends LitElement {
     if(kind==="scenes"&&!remove&&this.loadedLibraryRevision!==lib.revision){this.status="Library changed — reload the selected zone before saving";return;}
     if(id&&this.loadedLibraryRevision!==lib.revision){this.status="Library changed — reload the selected item before editing";return;}
     const value=remove?null:kind==="zones"?{name:this.zone,devices:[...this.chosen]}:
-      {name:this.sceneName,zone_id:this.selectedZone,effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth,...(this.effect==="layered"?{layers:structuredClone(this.layers)}:this.effect==="timeline"?{tracks:structuredClone(this.tracks),loop:this.timelineLoop,...(!this.timelineLoop&&this.timelineAutoEnd?{auto_end:true}:{})}:{})},stop_policy:this.stopPolicy};
+      {name:this.sceneName,zone_id:this.selectedZone,effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth,...(this.effect==="layered"?{layers:structuredClone(this.layers)}:this.effect==="timeline"?{tracks:structuredClone(this.tracks),loop:this.timelineLoop,...structuredClone(this.timing),...(!this.timelineLoop&&this.timelineAutoEnd?{auto_end:true}:{})}:{})},stop_policy:this.stopPolicy};
     void this.send({op:remove?"library_delete":"library_save",instance_id:state.instance_id,revision:id?this.loadedLibraryRevision:lib.revision,kind,id,value});
   }
   private needsAudio(){return this.effect==="audio_spectrum"||(this.effect==="layered"&&this.layers.some(l=>l.effect.kind==="audio_spectrum"))||(this.effect==="timeline"&&this.tracks.some(t=>t.clips.some(c=>c.layer.effect.kind==="audio_spectrum")));}
-  private validTimeline(){return this.validTargetMasks(this.chosen)&&this.tracks.some(t=>t.clips.length>0)&&this.tracks.every(t=>t.name.trim()&&t.clips.every(c=>[c.start,c.duration,c.fade_in,c.fade_out,c.layer.opacity,c.layer.effect.period_seconds,c.layer.effect.brightness,c.layer.effect.width].every(Number.isFinite)&&c.start>=0&&c.duration>0&&Number.isFinite(c.start+c.duration)&&c.start+c.duration>c.start&&c.fade_in>=0&&c.fade_out>=0&&c.fade_in+c.fade_out<=c.duration&&c.layer.opacity>=0&&c.layer.opacity<=1&&c.layer.effect.period_seconds>0&&c.layer.effect.brightness>=0&&c.layer.effect.brightness<=1&&c.layer.effect.width>0&&c.layer.effect.width<=1&&c.keyframes.every((k,i)=>Number.isFinite(k.time)&&Number.isFinite(k.value)&&k.time>=0&&k.time<=c.duration&&k.value>=0&&k.value<=1&&(i===0||k.time>c.keyframes[i-1].time))));}
+  private validTimeline(){const duration=this.tracks.reduce((d,t)=>t.clips.reduce((n,c)=>Math.max(n,c.start+c.duration),d),0);return validTiming(this.timing,duration)&&this.validTargetMasks(this.chosen)&&this.tracks.some(t=>t.clips.length>0)&&this.tracks.every(t=>t.name.trim()&&t.clips.every(c=>[c.start,c.duration,c.fade_in,c.fade_out,c.layer.opacity,c.layer.effect.period_seconds,c.layer.effect.brightness,c.layer.effect.width].every(Number.isFinite)&&c.start>=0&&c.duration>0&&Number.isFinite(c.start+c.duration)&&c.start+c.duration>c.start&&c.fade_in>=0&&c.fade_out>=0&&c.fade_in+c.fade_out<=c.duration&&c.layer.opacity>=0&&c.layer.opacity<=1&&c.layer.effect.period_seconds>0&&c.layer.effect.brightness>=0&&c.layer.effect.brightness<=1&&c.layer.effect.width>0&&c.layer.effect.width<=1&&c.keyframes.every((k,i)=>Number.isFinite(k.time)&&Number.isFinite(k.value)&&k.time>=0&&k.time<=c.duration&&k.value>=0&&k.value<=1&&(i===0||k.time>c.keyframes[i-1].time))));}
   private validLayers(){return this.validTargetMasks(this.chosen)&&this.layers.length>0&&this.layers.every(l=>Number.isFinite(l.opacity)&&l.opacity>=0&&l.opacity<=1&&Number.isFinite(l.effect.period_seconds)&&l.effect.period_seconds>0&&Number.isFinite(l.effect.brightness)&&l.effect.brightness>=0&&l.effect.brightness<=1&&Number.isFinite(l.effect.width)&&l.effect.width>0&&l.effect.width<=1);}
   private validTargetMasks(devices:string[]){
     const groups=this.effect==="layered"?this.layers:this.effect==="timeline"?this.tracks:[];
@@ -313,7 +315,7 @@ class LightCadencePanel extends LitElement {
                 <button aria-label=${"Move layer "+(i+1)+" down"}  ?disabled=${formLocked||i===0} @click=${()=>this.moveLayer(i,-1)}>Move down</button> <button aria-label=${"Move layer "+(i+1)+" up"} ?disabled=${formLocked||i===this.layers.length-1} @click=${()=>this.moveLayer(i,1)}>Move up</button> <button aria-label=${"Remove layer "+(i+1)} ?disabled=${formLocked} @click=${()=>this.layers=this.layers.filter((_,j)=>i!==j)}>Remove</button>
               </article>`)}
               <button ?disabled=${formLocked} @click=${()=>this.addLayer()}>Add layer</button></section>`:nothing}
-            ${this.effect==="timeline"?html`<lightcadence-timeline .tracks=${this.tracks} .loop=${this.timelineLoop} .locked=${formLocked} .lamps=${this.chosen.map(id=>({id,name:this.name(id)}))} @timeline-change=${(e:CustomEvent<{tracks:Track[];loop:boolean}>)=>{this.tracks=e.detail.tracks;this.timelineLoop=e.detail.loop;if(this.timelineLoop)this.timelineAutoEnd=false;}}></lightcadence-timeline>${!this.timelineLoop?html`<label>End action <select aria-label="Timeline end action" .value=${this.timelineAutoEnd?"stop":"wait"} ?disabled=${formLocked} @change=${(e:Event)=>this.timelineAutoEnd=(e.target as HTMLSelectElement).value==="stop"}><option value="wait">End dark, wait for explicit Stop</option><option value="stop">Automatically apply stop behaviour</option></select></label><p>${this.timelineAutoEnd?"At natural end, release using the selected stop behaviour. Unconfirmed device restoration requires explicit retry.":"Lamps remain reserved until Stop."}</p>`:nothing}`:nothing}
+            ${this.effect==="timeline"?html`<lightcadence-timeline .timing=${this.timing} @timing-change=${(e:CustomEvent<Timing>)=>this.timing=e.detail} .tracks=${this.tracks} .loop=${this.timelineLoop} .locked=${formLocked} .lamps=${this.chosen.map(id=>({id,name:this.name(id)}))} @timeline-change=${(e:CustomEvent<{tracks:Track[];loop:boolean}>)=>{this.tracks=e.detail.tracks;this.timelineLoop=e.detail.loop;if(this.timelineLoop)this.timelineAutoEnd=false;}}></lightcadence-timeline>${!this.timelineLoop?html`<label>End action <select aria-label="Timeline end action" .value=${this.timelineAutoEnd?"stop":"wait"} ?disabled=${formLocked} @change=${(e:Event)=>this.timelineAutoEnd=(e.target as HTMLSelectElement).value==="stop"}><option value="wait">End dark, wait for explicit Stop</option><option value="stop">Automatically apply stop behaviour</option></select></label><p>${this.timelineAutoEnd?"At natural end, release using the selected stop behaviour. Unconfirmed device restoration requires explicit retry.":"Lamps remain reserved until Stop."}</p>`:nothing}`:nothing}
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
             ${physical?html`<label>Stop behaviour <select .value=${this.stopPolicy} ?disabled=${formLocked} @change=${(e:Event)=>this.stopPolicy=(e.target as HTMLSelectElement).value as StopPolicy}><option value="restore">Restore original state</option><option value="hold">Hold last state</option><option value="off">Turn off</option></select></label>`:nothing}
             ${paths.length?html`<label>Spatial effect path <select aria-label="Spatial effect path" .value=${this.spatialPath} ?disabled=${formLocked} @change=${(e:Event)=>this.spatialPath=(e.target as HTMLSelectElement).value}><option value="">Ordered lamps</option>${paths.map(p=>html`<option value=${p.floorplan_id+"/"+p.path_id} ?disabled=${!p.positions}>${p.name}${p.positions?"":" · missing placements"}</option>`)}</select></label>`:nothing}
@@ -338,7 +340,7 @@ class LightCadencePanel extends LitElement {
           </section>`:nothing}
           <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
           ${active.length?active.map(s=>html`<article data-phase=${s.phase}><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>${s.effect.audio_source?html`<p>Audio: ${sources.find(a=>a.id===s.effect.audio_source)?.name??"Source disconnected"} · ${sources.find(a=>a.id===s.effect.audio_source)?.status??"ambient"}</p>`:nothing}
-            ${s.timeline?html`<p>Timeline · ${s.timeline.playhead.toFixed(2)} / ${s.timeline.duration.toFixed(2)} s · ${s.timeline.ending?"Automatic stop in progress":s.phase==="stopping"?"Stop pending — inspect or retry explicitly":s.timeline.paused?"Paused":s.timeline.ended?"Ended — stop to release lamps":s.timeline.loop?"Looping":"Playing"}</p><progress aria-label="Timeline playhead" max=${s.timeline.duration} .value=${s.timeline.playhead}></progress>
+            ${s.timeline?html`<p>Timeline · ${s.timeline.playhead.toFixed(2)} / ${s.timeline.duration.toFixed(2)} s · ${s.timeline.ending?"Automatic stop in progress":s.phase==="stopping"?"Stop pending — inspect or retry explicitly":s.timeline.paused?"Paused":s.timeline.ended?"Ended — stop to release lamps":s.timeline.loop?"Looping":"Playing"}</p><progress aria-label="Timeline playhead" max=${s.timeline.duration} .value=${s.timeline.playhead}></progress>${s.timeline.beat!==undefined?html`<p>Beat ${s.timeline.beat.toFixed(2)} / ${s.timeline.duration_beats?.toFixed(2)}</p>`:nothing}${s.timeline.markers?.length?html`<div class="timeline-controls">${s.timeline.markers.map(m=>html`<button ?disabled=${!this.online||this.busy||s.phase!=="running"} @click=${()=>this.controlTimeline(s,"seek",m.seconds)}>Seek marker: ${m.name}</button>`)}</div>`:nothing}
             <div class="timeline-controls"><button ?disabled=${!this.online||this.busy||s.phase!=="running"} @click=${()=>this.controlTimeline(s,s.timeline?.paused?"resume":"pause")}>${s.timeline.paused?"Resume timeline":"Pause timeline"}</button>
             <button ?disabled=${!this.online||this.busy||s.phase!=="running"} @click=${()=>this.controlTimeline(s,"seek",0)}>Seek to start</button>
             <form @submit=${(e:SubmitEvent)=>{e.preventDefault();const input=(e.currentTarget as HTMLFormElement).querySelector("input");if(input)this.controlTimeline(s,"seek",input.valueAsNumber);}}>

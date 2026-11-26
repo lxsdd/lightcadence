@@ -3,20 +3,35 @@ import {LitElement, html, css} from "lit";
 type Leaf={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
 type Key={time:number;value:number;curve:"linear"|"hold"|"smooth"};
 type Clip={start:number;duration:number;fade_in:number;fade_out:number;layer:{effect:Leaf;opacity:number;blend:"over"|"add"|"max"};keyframes:Key[]};
+export type TempoPoint={beat:number;bpm:number};
+export type TimelineMarker={time:number;name:string};
+export type Timing={tempo_map?:TempoPoint[];markers?:TimelineMarker[]};
+export function validTiming(timing:Timing,duration:number){
+  const tempo=timing.tempo_map,markers=timing.markers??[];
+  return (!tempo||(tempo.length>0&&tempo[0].beat===0&&tempo.every((p,i)=>Number.isFinite(p.beat)&&p.beat>=0&&p.beat<=duration&&Number.isFinite(p.bpm)&&p.bpm>0&&(i===0||p.beat>tempo[i-1].beat))))&&markers.every((m,i)=>Number.isFinite(m.time)&&m.time>=0&&m.time<=duration&&!!m.name.trim()&&(i===0||m.time>markers[i-1].time));
+}
 export type Track={name:string;clips:Clip[];devices?:string[]};
 
 class TimelineEditor extends LitElement {
-  static properties={tracks:{attribute:false},loop:{type:Boolean},locked:{type:Boolean},lamps:{attribute:false},selected:{state:true}};
+  static properties={tracks:{attribute:false},loop:{type:Boolean},locked:{type:Boolean},lamps:{attribute:false},timing:{attribute:false},selected:{state:true}};
   declare tracks:Track[];
+  declare timing:Timing;
   declare loop:boolean;
   declare locked:boolean;
   declare selected:string;
   declare lamps:{id:string;name:string}[];
   private drag?:{pointer:number;bar:HTMLElement;tracks:Track[];i:number;j:number;x:number;start:number;duration:number;total:number;width:number;next:number};
-  constructor(){super();this.tracks=[];this.loop=true;this.locked=false;this.lamps=[];this.selected="";}
+  constructor(){super();this.tracks=[];this.timing={};this.loop=true;this.locked=false;this.lamps=[];this.selected="";}
   private change(tracks:Track[],loop=this.loop){
     if(this.locked)return;
     this.dispatchEvent(new CustomEvent("timeline-change",{detail:{tracks,loop},bubbles:true,composed:true}));
+  }
+  private changeTiming(timing:Timing){
+    if(this.locked)return;
+    this.dispatchEvent(new CustomEvent("timing-change",{detail:timing,bubbles:true,composed:true}));
+  }
+  private editTiming(fn:(timing:Timing)=>void){
+    const next=structuredClone(this.timing);fn(next);this.changeTiming(next);
   }
   private edit(fn:(tracks:Track[])=>void){const next=structuredClone(this.tracks);fn(next);this.change(next);}
   private trackMove(i:number,delta:number){this.edit(t=>{const dest=i+delta;if(dest>=0&&dest<t.length){[t[i],t[dest]]=[t[dest],t[i]];}});this.selected="";}
@@ -57,17 +72,28 @@ class TimelineEditor extends LitElement {
   render(){
     const duration=this.tracks.reduce((d,t)=>t.clips.reduce((n,c)=>Math.max(n,Number.isFinite(c.start+c.duration)?c.start+c.duration:0),d),0);
     const total=duration||1;
+    const unit=this.timing.tempo_map?"beat":"s";
+    const hasTimingContent=this.tracks.some(t=>t.clips.length>0)||!!this.timing.markers?.length;
     const [i,j]=this.selected.split("/").map(Number),clip=this.selected?this.tracks[i]?.clips[j]:undefined;
-    return html`<section aria-label="Timeline editor"><h3>Timeline Studio</h3><p>Seconds · tracks and clips mix bottom to top in list order. Overlapping clips use fades and blend rules. No output until explicit start. Drag a clip within the ruler (0.1 s snap); use the numeric inspector to extend the timeline.</p>
+    return html`<section aria-label="Timeline editor"><h3>Timeline Studio</h3><p>Tracks and clips mix bottom to top in list order. No output until explicit start. Drag within the ruler (0.1 ${unit} snap); numeric editing can extend the timeline. Effect periods remain in seconds.</p>
+    <label>Timebase <select aria-label="Timeline timebase" .value=${this.timing.tempo_map?"beats":"seconds"} ?disabled=${this.locked||hasTimingContent} @change=${(e:Event)=>this.changeTiming((e.target as HTMLSelectElement).value==="beats"?{tempo_map:[{beat:0,bpm:120}]}:{})}><option value="seconds">Seconds</option><option value="beats">Musical beats</option></select></label>
+    ${hasTimingContent?html`<p>Timebase is fixed while clips or markers exist to avoid reinterpreting authored timing.</p>`:""}
+    ${this.timing.tempo_map?html`<h3>Tempo map</h3><p>Beat zero and strictly increasing tempo changes. This is authored tempo, not detected audio synchronization.</p>
+    ${this.timing.tempo_map.map((p,i)=>html`<div class="key"><label>Beat <input aria-label=${"Tempo "+(i+1)+" beat"} type="number" min="0" step="any" .value=${String(p.beat)} ?disabled=${this.locked||i===0} @change=${(e:Event)=>this.editTiming(t=>t.tempo_map![i].beat=(e.target as HTMLInputElement).valueAsNumber)}></label><label>BPM <input aria-label=${"Tempo "+(i+1)+" BPM"} type="number" min="0" step="any" .value=${String(p.bpm)} ?disabled=${this.locked} @change=${(e:Event)=>this.editTiming(t=>t.tempo_map![i].bpm=(e.target as HTMLInputElement).valueAsNumber)}></label><button ?disabled=${this.locked||i===0} @click=${()=>this.editTiming(t=>t.tempo_map!.splice(i,1))}>Remove tempo</button></div>`)}
+    <button ?disabled=${this.locked||(this.timing.tempo_map.at(-1)?.beat??0)>=duration} @click=${()=>this.editTiming(t=>{const last=t.tempo_map!.at(-1)!;t.tempo_map!.push({beat:Math.min(duration,last.beat+4),bpm:last.bpm});})}>Add tempo change</button>`:""}
+    <h3>Markers</h3>
+    ${(this.timing.markers??[]).map((m,i)=>html`<div class="key"><label>Name <input aria-label=${"Marker "+(i+1)+" name"} .value=${m.name} ?disabled=${this.locked} @change=${(e:Event)=>this.editTiming(t=>t.markers![i].name=(e.target as HTMLInputElement).value)}></label><label>Position (${unit}) <input aria-label=${"Marker "+(i+1)+" time"} type="number" min="0" step="any" .value=${String(m.time)} ?disabled=${this.locked} @change=${(e:Event)=>this.editTiming(t=>t.markers![i].time=(e.target as HTMLInputElement).valueAsNumber)}></label><button ?disabled=${this.locked} @click=${()=>this.editTiming(t=>t.markers!.splice(i,1))}>Remove marker</button></div>`)}
+    <button ?disabled=${this.locked||!duration||(this.timing.markers?.at(-1)?.time??-1)>=duration} @click=${()=>this.editTiming(t=>{const ms=t.markers??=[];ms.push({time:ms.length?Math.min(duration,ms.at(-1)!.time+1):0,name:"Marker "+(ms.length+1)});})}>Add marker</button>
+    ${!validTiming(this.timing,duration)?html`<p role="alert">Tempo points and markers must be valid, ordered and within the timeline.</p>`:""}
     <label class="inline"><input type="checkbox" .checked=${this.loop} ?disabled=${this.locked} @change=${(e:Event)=>this.change(this.tracks,(e.target as HTMLInputElement).checked)}> Loop timeline</label>
-    <p>Duration: ${duration.toFixed(2)} s. Set an explicit end action below the timeline.</p>
-    <div class="ruler">${[0,.25,.5,.75,1].map(f=>html`<span>${(total*f).toFixed(1)} s</span>`)}</div>
+    <p>Duration: ${duration.toFixed(2)} ${unit}. Set an explicit end action below the timeline.</p>
+    <div class="ruler">${[0,.25,.5,.75,1].map(f=>html`<span>${(total*f).toFixed(1)} ${unit}</span>`)}</div>
     ${this.tracks.map((t,ti)=>html`<article><label>Track name <input aria-label=${"Track "+(ti+1)+" name"} .value=${t.name} ?disabled=${this.locked} @change=${(e:Event)=>this.edit(ts=>ts[ti].name=(e.target as HTMLInputElement).value)}></label>
       <p>Targets: ${t.devices===undefined?"All selected lamps":t.devices.length+" specific lamps"}</p>
       <button ?disabled=${this.locked||(!this.lamps.length&&t.devices===undefined)} @click=${()=>this.edit(ts=>{if(ts[ti].devices===undefined)ts[ti].devices=this.lamps.map(l=>l.id);else delete ts[ti].devices;})}>${t.devices===undefined?"Choose track lamps":"Use all track lamps"}</button>
       ${t.devices!==undefined?html`<div class="actions" aria-label=${"Track "+(ti+1)+" lamp targets"}>${[...this.lamps,...t.devices.filter(id=>!this.lamps.some(l=>l.id===id)).map(id=>({id,name:"Outside selection: "+id}))].map(l=>html`<button aria-label=${"Track "+(ti+1)+" target "+l.name} aria-pressed=${t.devices?.includes(l.id)===true} ?disabled=${this.locked} @click=${()=>this.edit(ts=>{const ds=ts[ti].devices??[];ts[ti].devices=ds.includes(l.id)?ds.filter(d=>d!==l.id):[...ds,l.id];})}>${l.name}</button>`)}</div>`:""}
       <div class="lane" aria-label=${"Track "+(ti+1)+" time ruler"}>${t.clips.map((c,ci)=>html`<div class="cliprow"><button type="button" class="clipbar" aria-label=${"Move clip "+(ti+1)+"/"+(ci+1)} title="Drag to move in time; numeric editing can extend the ruler" ?disabled=${this.locked} style=${"margin-inline-start:"+Math.min(100,Math.max(0,c.start/total*100||0))+"%;width:"+Math.min(100,Math.max(0,c.duration/total*100||0))+"%"} @pointerdown=${(e:PointerEvent)=>this.dragStart(e,ti,ci,total)} @pointermove=${(e:PointerEvent)=>this.dragMove(e)} @pointerup=${(e:PointerEvent)=>{this.dragMove(e);this.dragEnd(e,true);}} @pointercancel=${(e:PointerEvent)=>this.dragEnd(e,false)} @lostpointercapture=${(e:PointerEvent)=>this.dragEnd(e,false)} @click=${()=>this.selected=ti+"/"+ci}></button></div>`)}</div>
-      <div class="actions">${t.clips.map((c,ci)=>html`<button aria-pressed=${this.selected===ti+"/"+ci} ?disabled=${this.locked} @click=${()=>this.selected=ti+"/"+ci}>Clip ${ci+1}: ${c.layer.effect.kind} · ${c.start} s</button>`)}
+      <div class="actions">${t.clips.map((c,ci)=>html`<button aria-pressed=${this.selected===ti+"/"+ci} ?disabled=${this.locked} @click=${()=>this.selected=ti+"/"+ci}>Clip ${ci+1}: ${c.layer.effect.kind} · ${c.start} ${unit}</button>`)}
         <button ?disabled=${this.locked} @click=${()=>this.addClip(ti)}>Add clip</button>
         <button aria-label=${"Move track "+(ti+1)+" earlier"} ?disabled=${this.locked||ti===0} @click=${()=>this.trackMove(ti,-1)}>Earlier</button>
         <button aria-label=${"Move track "+(ti+1)+" later"} ?disabled=${this.locked||ti===this.tracks.length-1} @click=${()=>this.trackMove(ti,1)}>Later</button>
@@ -75,12 +101,12 @@ class TimelineEditor extends LitElement {
     <button ?disabled=${this.locked} @click=${()=>this.edit(t=>t.push({name:"Track "+(t.length+1),clips:[]}))}>Add track</button>
     ${clip?html`<article><h3>Clip inspector · ${i+1}/${j+1}</h3>
       <label>Clip effect <select aria-label="Clip effect" .value=${clip.layer.effect.kind} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect.kind=(e.target as HTMLSelectElement).value)}>${["static","rainbow","scanner","pulse","audio_spectrum"].map(k=>html`<option value=${k}>${k}</option>`)}</select></label>
-      ${(["start","duration","fade_in","fade_out"] as const).map(k=>html`<label>${k} (s) <input aria-label=${"Clip "+k} type="number" step="any" min="0" .value=${String(clip[k])} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c[k]=(e.target as HTMLInputElement).valueAsNumber)}></label>`)}
+      ${(["start","duration","fade_in","fade_out"] as const).map(k=>html`<label>${k} (${unit}) <input aria-label=${"Clip "+k} type="number" step="any" min="0" .value=${String(clip[k])} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c[k]=(e.target as HTMLInputElement).valueAsNumber)}></label>`)}
       ${(["period_seconds","brightness","width"] as const).map(k=>html`<label>${k} <input aria-label=${"Clip "+k} type="number" step="any" .value=${String(clip.layer.effect[k])} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect[k]=(e.target as HTMLInputElement).valueAsNumber)}></label>`)}
       <label>Colour <input aria-label="Clip colour" type="color" .value=${this.hex(clip.layer.effect.color)} ?disabled=${this.locked} @input=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect.color=this.rgb((e.target as HTMLInputElement).value))}></label>
       <label>Opacity <input aria-label="Clip opacity" type="number" min="0" max="1" step="any" .value=${String(clip.layer.opacity)} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.opacity=(e.target as HTMLInputElement).valueAsNumber)}></label>
       <label>Blend <select aria-label="Clip blend" .value=${clip.layer.blend} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.blend=(e.target as HTMLSelectElement).value as Clip["layer"]["blend"])}>${["over","add","max"].map(k=>html`<option value=${k}>${k}</option>`)}</select></label>
-      <h3>Opacity keyframes</h3><p>Clip-local seconds; increasing times, outgoing curve.</p>
+      <h3>Opacity keyframes</h3><p>Clip-local ${unit}; increasing times, outgoing curve.</p>
       ${clip.keyframes.map((k,ki)=>html`<div class="key"><label>Time <input aria-label=${"Key "+(ki+1)+" time"} type="number" min="0" step="any" .value=${String(k.time)} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.keyframes[ki].time=(e.target as HTMLInputElement).valueAsNumber)}></label>
         <label>Value <input aria-label=${"Key "+(ki+1)+" value"} type="number" min="0" max="1" step="any" .value=${String(k.value)} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.keyframes[ki].value=(e.target as HTMLInputElement).valueAsNumber)}></label>
         <label>Curve <select aria-label=${"Key "+(ki+1)+" curve"} .value=${k.curve} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.keyframes[ki].curve=(e.target as HTMLSelectElement).value as Key["curve"])}>${["linear","hold","smooth"].map(v=>html`<option value=${v}>${v}</option>`)}</select></label>

@@ -18,6 +18,8 @@ class EffectKind(StrEnum):
     SCANNER = "scanner"
     PULSE = "pulse"
     AUDIO_SPECTRUM = "audio_spectrum"
+    STATIC = "static"
+    LAYERED = "layered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,7 @@ class Effect:
     color: tuple[float, float, float] = (1.0, 0.0, 0.0)
     width: float = 0.25
     audio_source: str | None = None
+    layers: tuple['Layer', ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.kind, EffectKind):
@@ -56,7 +59,19 @@ class Effect:
         if not isinstance(self.color, tuple) or len(self.color) != 3:
             raise ValueError("color must be an immutable RGB triple")
         LightTarget(*self.color, self.brightness)
-        if self.kind is EffectKind.AUDIO_SPECTRUM:
+        if not isinstance(self.layers, tuple) or not all(isinstance(layer, Layer) for layer in self.layers):
+            raise ValueError("invalid layers")
+        if self.kind is EffectKind.LAYERED:
+            if not self.layers or any(layer.effect.kind is EffectKind.LAYERED for layer in self.layers):
+                raise ValueError("nonempty flat layer stack required")
+            if any(layer.effect.audio_source is not None and layer.effect.audio_source != self.audio_source for layer in self.layers):
+                raise ValueError("one audio source per show")
+            needs_audio = any(layer.effect.kind is EffectKind.AUDIO_SPECTRUM for layer in self.layers)
+        else:
+            if self.layers:
+                raise ValueError("layers require layered effect")
+            needs_audio = self.kind is EffectKind.AUDIO_SPECTRUM
+        if needs_audio:
             if not isinstance(self.audio_source, str) or not self.audio_source.strip():
                 raise ValueError("select an audio source")
         elif self.audio_source is not None:
@@ -66,6 +81,15 @@ class Effect:
         if (not isfinite(elapsed) or elapsed < 0 or
                 not isfinite(position) or not 0 <= position <= 1):
             raise ValueError("invalid elapsed time or position")
+        if self.kind is EffectKind.STATIC:
+            return LightTarget(*self.color, self.brightness)
+        if self.kind is EffectKind.LAYERED:
+            rgb = (0., 0., 0.)
+            for layer in self.layers:
+                target = layer.effect.render(elapsed, position, audio)
+                rgb = blend_linear(rgb, target, layer.opacity, layer.blend)
+            peak = max(rgb)
+            return LightTarget(*(v / peak if peak else 0. for v in rgb), peak * self.brightness)
         if self.kind is EffectKind.AUDIO_SPECTRUM:
             bands = audio if audio is not None else (.06, .06, .06)
             LightTarget(*bands, 1.)
@@ -86,3 +110,84 @@ class Effect:
         else:
             level = (1 - cos(2 * pi * phase)) / 2
         return LightTarget(*self.color, self.brightness * level)
+
+
+class Blend(StrEnum):
+    OVER = "over"
+    ADD = "add"
+    MAX = "max"
+
+
+@dataclass(frozen=True, slots=True)
+class Layer:
+    effect: Effect
+    opacity: float = 1.
+    blend: Blend = Blend.OVER
+
+    def __post_init__(self):
+        if not isinstance(self.effect, Effect) or self.effect.kind is EffectKind.LAYERED:
+            raise ValueError("invalid layer effect")
+        if type(self.opacity) not in (int, float) or not isfinite(self.opacity) or not 0 <= self.opacity <= 1:
+            raise ValueError("invalid layer opacity")
+        if not isinstance(self.blend, Blend):
+            raise ValueError("invalid blend")
+
+
+def blend_linear(base, target, opacity, blend):
+    """Combine premultiplied linear-light energy; normalize once at the output."""
+    rgb = (target.red, target.green, target.blue)
+    # Effect brightness determines coverage for OVER, so a scanner's dark
+    # region reveals the underlying ambient layer rather than erasing it.
+    alpha = opacity * target.brightness
+    if blend is Blend.OVER:
+        return tuple(a * (1 - alpha) + b * alpha for a, b in zip(base, rgb))
+    if blend is Blend.ADD:
+        return tuple(min(1., a + b * alpha) for a, b in zip(base, rgb))
+    return tuple(max(a, b * alpha) for a, b in zip(base, rgb))
+
+
+def decode_effect(value, *, template=False):
+    """Shared API/preset parser. Persisted presets never contain live source IDs."""
+    base = {"kind", "period_seconds", "brightness", "color", "width"}
+    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"layers"} | (set() if template else {"audio_source"}):
+        raise ValueError("invalid effect fields")
+    if template and not base <= value.keys():
+        raise ValueError("incomplete preset")
+    params = dict(value)
+    kind = EffectKind(params.pop("kind"))
+    raw_layers = params.pop("layers", None)
+    if "color" in params:
+        if not isinstance(params["color"], list):
+            raise ValueError("invalid color")
+        params["color"] = tuple(params["color"])
+    if kind is EffectKind.LAYERED:
+        if not isinstance(raw_layers, list) or not raw_layers:
+            raise ValueError("select layers")
+        source = params.get("audio_source")
+        layers = []
+        for raw in raw_layers:
+            if not isinstance(raw, dict) or set(raw) != {"effect", "opacity", "blend"}:
+                raise ValueError("invalid layer fields")
+            child = raw["effect"]
+            if not isinstance(child, dict) or set(child) != base or child["kind"] == "layered":
+                raise ValueError("invalid nested effect")
+            if child["kind"] == "audio_spectrum":
+                if template:
+                    source = "selection-required"
+                child = {**child, "audio_source": source}
+            layers.append(Layer(decode_effect(child), raw["opacity"], Blend(raw["blend"])))
+        params.update(layers=tuple(layers), audio_source=source)
+    elif raw_layers is not None:
+        raise ValueError("layers require layered effect")
+    elif template and kind is EffectKind.AUDIO_SPECTRUM:
+        params["audio_source"] = "selection-required"
+    return Effect(kind, **params)
+
+
+def encode_preset(spec):
+    result = {"kind": spec.kind.value, "period_seconds": spec.period_seconds,
+              "brightness": spec.brightness, "color": list(spec.color), "width": spec.width}
+    if spec.kind is EffectKind.LAYERED:
+        result["layers"] = [{"effect": encode_preset(layer.effect), "opacity": layer.opacity,
+                             "blend": layer.blend.value} for layer in spec.layers]
+    return result

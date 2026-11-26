@@ -4,7 +4,7 @@ from dataclasses import asdict
 from time import monotonic
 from uuid import uuid4
 
-from .effects import Effect, EffectKind, LightTarget, linear_channel
+from .effects import LightTarget, linear_channel, decode_effect
 from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
 from .audio import AudioHub
@@ -31,19 +31,11 @@ def parse_start(body):
         identity(device)
     if len(set(devices)) != len(devices):
         raise ValueError("duplicate device")
-    params = fields(body["effect"], ("kind",), ("period_seconds", "brightness", "color", "width", "audio_source"))
-    if not isinstance(params["kind"], str):
-        raise ValueError("invalid effect kind")
-    params = dict(params)
-    params["kind"] = EffectKind(params["kind"])
-    if "color" in params:
-        if not isinstance(params["color"], list):
-            raise ValueError("invalid color")
-        params["color"] = tuple(params["color"])
+    effect = decode_effect(body["effect"])
     positions = body.get("positions")
     if positions is not None and not isinstance(positions, dict):
         raise ValueError("invalid positions")
-    return devices, Effect(**params), positions
+    return devices, effect, positions
 
 
 def parse_manual_state(body):

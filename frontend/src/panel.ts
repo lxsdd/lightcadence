@@ -10,19 +10,21 @@ type Session = {id: string; zone_id: string; phase: string; revision: number; de
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number};
-type PresetEffect={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
+type LeafEffect={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
+type Layer={effect:LeafEffect;opacity:number;blend:"over"|"add"|"max"};
+type PresetEffect=LeafEffect & {layers?:Layer[]};
 type Zone={id:string;name:string;revision:number;devices:string[]};
 type Scene={id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
 type Library={floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
 type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes"|"floorplans";id:string|null;value:Record<string,unknown>|null};
 type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
-type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string}};
+type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[]}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
 type Command = LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
-const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum"};
+const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum",static:"Static colour",layered:"Layered scene"};
 function observationLabel(light: Light): string {
   const o=light.observation;
   if(!o || o.source!=="ha_cache") return "No cached state";
@@ -48,7 +50,7 @@ function color(t: RGB | undefined): string {
 class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
-    zone:{state:true}, effect:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
+    zone:{state:true}, effect:{state:true},layers:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
     busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
     manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
   };
@@ -58,6 +60,7 @@ class LightCadencePanel extends LitElement {
   declare chosen: string[];
   declare zone: string;
   declare effect: string;
+  declare layers:Layer[];
   declare audioSource:string;
   declare selectedZone:string;
   declare spatialPath:string;
@@ -83,7 +86,7 @@ class LightCadencePanel extends LitElement {
   private entry?: string;
   private refreshing = false;
   constructor() {
-    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
+    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[]; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
     this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
@@ -161,7 +164,8 @@ class LightCadencePanel extends LitElement {
     if(!this.zone.trim() || !this.chosen.length || !Number.isFinite(this.period) || this.period<=0 || !Number.isFinite(this.brightness) || this.brightness<0 || this.brightness>1) return;
     const payload:Start={op:"start",request_id:requestId(),zone_id:this.zone.trim(),devices:[...this.chosen],
       effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth}};
-    if(this.effect==="audio_spectrum") {
+    if(this.effect==="layered") {if(!this.validLayers())return;payload.effect.layers=structuredClone(this.layers);}
+    if(this.needsAudio()) {
       if(!this.snapshot?.audio_sources?.some(s=>s.id===this.audioSource)) return;
       payload.effect.audio_source=this.audioSource;
     }
@@ -185,7 +189,7 @@ class LightCadencePanel extends LitElement {
     const s=this.snapshot?.library?.scenes.find(x=>x.id===id);
     const z=this.snapshot?.library?.zones.find(x=>x.id===s?.zone_id);
     if(!s||!z||!z.devices.every(d=>this.catalog?.lights.some(l=>l.id===d))) {this.status="Scene contains missing registry devices";return;}
-    this.loadZone(z.id);this.selectedScene=s.id;this.sceneName=s.name;this.effect=s.effect.kind;
+    this.loadZone(z.id);this.selectedScene=s.id;this.sceneName=s.name;this.effect=s.effect.kind;this.layers=structuredClone(s.effect.layers??[]);
     this.effectColor=[...s.effect.color];this.effectWidth=s.effect.width;this.period=s.effect.period_seconds;this.brightness=s.effect.brightness;this.stopPolicy=s.stop_policy;this.audioSource="";
   }
   private libraryWrite(kind:"zones"|"scenes",remove=false,create=false) {
@@ -196,9 +200,17 @@ class LightCadencePanel extends LitElement {
     if(kind==="scenes"&&!remove&&this.loadedLibraryRevision!==lib.revision){this.status="Library changed — reload the selected zone before saving";return;}
     if(id&&this.loadedLibraryRevision!==lib.revision){this.status="Library changed — reload the selected item before editing";return;}
     const value=remove?null:kind==="zones"?{name:this.zone,devices:[...this.chosen]}:
-      {name:this.sceneName,zone_id:this.selectedZone,effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth},stop_policy:this.stopPolicy};
+      {name:this.sceneName,zone_id:this.selectedZone,effect:{kind:this.effect,period_seconds:this.period,brightness:this.brightness,color:[...this.effectColor],width:this.effectWidth,...(this.effect==="layered"?{layers:structuredClone(this.layers)}:{})},stop_policy:this.stopPolicy};
     void this.send({op:remove?"library_delete":"library_save",instance_id:state.instance_id,revision:id?this.loadedLibraryRevision:lib.revision,kind,id,value});
   }
+  private needsAudio(){return this.effect==="audio_spectrum"||(this.effect==="layered"&&this.layers.some(l=>l.effect.kind==="audio_spectrum"));}
+  private validLayers(){return this.layers.length>0&&this.layers.every(l=>Number.isFinite(l.opacity)&&l.opacity>=0&&l.opacity<=1&&Number.isFinite(l.effect.period_seconds)&&l.effect.period_seconds>0&&Number.isFinite(l.effect.brightness)&&l.effect.brightness>=0&&l.effect.brightness<=1&&Number.isFinite(l.effect.width)&&l.effect.width>0&&l.effect.width<=1);}
+  private addLayer(){this.layers=[...this.layers,{effect:{kind:"static",period_seconds:4,brightness:.5,color:[1,1,1],width:.25},opacity:1,blend:"over"}];}
+  private setLayer(index:number,patch:Partial<Layer>){this.layers=this.layers.map((l,i)=>i===index?{...l,...patch}:l);}
+  private setLeaf(index:number,patch:Partial<LeafEffect>){this.setLayer(index,{effect:{...this.layers[index].effect,...patch}});}
+  private moveLayer(index:number,delta:number){const next=[...this.layers];const dest=index+delta;if(dest<0||dest>=next.length)return;[next[index],next[dest]]=[next[dest],next[index]];this.layers=next;}
+  private layerHex(rgb:number[]){return "#"+rgb.map(v=>Math.round(255*(v<=.0031308?12.92*v:1.055*Math.pow(v,1/2.4)-.055)).toString(16).padStart(2,"0")).join("");}
+  private fromHex(hex:string){return [1,3,5].map(i=>{const v=parseInt(hex.slice(i,i+2),16)/255;return v<=.04045?v/12.92:Math.pow((v+.055)/1.055,2.4);});}
   private manual(off: boolean) {
     if(this.pendingManual) {void this.send(this.pendingManual);return;}
     if(!this.catalog?.physical_output_enabled || !this.snapshot || !this.catalog.lights.some(l=>l.id===this.manualDevice)) return;
@@ -228,7 +240,7 @@ class LightCadencePanel extends LitElement {
     const libraryLocked=formLocked||!this.online||!!this.pendingManual||!!lib?.fault;
     const paths=lib?.spatial_paths?.filter(p=>p.zone_id===this.selectedZone)??[];
     const validZone=!!this.zone.trim()&&this.chosen.length>0;
-    const validScene=!!this.sceneName.trim()&&!!lib?.zones.some(z=>z.id===this.selectedZone)&&Number.isFinite(this.period)&&this.period>0&&Number.isFinite(this.brightness)&&this.brightness>=0&&this.brightness<=1;
+    const validScene=(this.effect!=="layered"||this.validLayers())&&!!this.sceneName.trim()&&!!lib?.zones.some(z=>z.id===this.selectedZone)&&Number.isFinite(this.period)&&this.period>0&&Number.isFinite(this.brightness)&&this.brightness>=0&&this.brightness<=1;
     return html`
       <main>
         <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
@@ -240,13 +252,26 @@ class LightCadencePanel extends LitElement {
           <section aria-labelledby="setup"><h2 id="setup">${physical?"New zone show":"New zone preview"}</h2>
             <label>Zone name <input aria-label="Zone name" title="Label for this independent preview session" .value=${this.zone} ?disabled=${formLocked} @input=${(e:Event)=>this.zone=(e.target as HTMLInputElement).value}></label>
             <label>Effect <select aria-label="Effect" .value=${this.effect} ?disabled=${formLocked} @change=${(e:Event)=>this.effect=(e.target as HTMLSelectElement).value}>${Object.entries(descriptions).map(([key,title])=>html`<option value=${key}>${title}</option>`)}</select></label>
-            ${this.effect==="audio_spectrum"?html`<label>Audio source <select aria-label="Audio source" .value=${this.audioSource} ?disabled=${formLocked} @change=${(e:Event)=>this.audioSource=(e.target as HTMLSelectElement).value}><option value="">Select local PCM source</option>${sources.map(s=>html`<option value=${s.id}>${s.name} · ${s.status}</option>`)}</select></label><p>No audio is captured by this panel. Start an authorized local PCM sender first.</p>`:html`<label>Period (seconds) <input type="number" step="any" .value=${String(this.period)} ?disabled=${formLocked} @input=${(e:Event)=>this.period=(e.target as HTMLInputElement).valueAsNumber}></label>`}
+            ${this.needsAudio()?html`<label>Audio source <select aria-label="Audio source" .value=${this.audioSource} ?disabled=${formLocked} @change=${(e:Event)=>this.audioSource=(e.target as HTMLSelectElement).value}><option value="">Select local PCM source</option>${sources.map(s=>html`<option value=${s.id}>${s.name} · ${s.status}</option>`)}</select></label><p>No audio is captured by this panel. Start an authorized local PCM sender first.</p>`:html`<label>Period (seconds) <input type="number" step="any" .value=${String(this.period)} ?disabled=${formLocked} @input=${(e:Event)=>this.period=(e.target as HTMLInputElement).valueAsNumber}></label>`}
+            ${this.effect==="static"?html`<label>Static colour <input type="color" .value=${this.layerHex(this.effectColor)} ?disabled=${formLocked} @input=${(e:Event)=>{this.effectColor=this.fromHex((e.target as HTMLInputElement).value);this.requestUpdate();}}></label>`:nothing}
+            ${this.effect==="layered"?html`<section aria-label="Layer editor"><h3>Scene layers</h3><p>Bottom to top. One mixed light target per lamp. No changes until an explicit start or save.</p>
+              ${this.layers.map((l,i)=>html`<article><h3>Layer ${i+1}</h3>
+                <label>Layer ${i+1} effect <select aria-label=${"Layer "+(i+1)+" effect"} .value=${l.effect.kind} ?disabled=${formLocked} @change=${(e:Event)=>this.setLeaf(i,{kind:(e.target as HTMLSelectElement).value})}>${Object.entries(descriptions).filter(([k])=>k!=="layered").map(([k,v])=>html`<option value=${k}>${v}</option>`)}</select></label>
+                <label>Colour <input aria-label=${"Layer "+(i+1)+" colour"} type="color" .value=${this.layerHex(l.effect.color)} ?disabled=${formLocked} @input=${(e:Event)=>this.setLeaf(i,{color:this.fromHex((e.target as HTMLInputElement).value)})}></label>
+                <label>Period (s) <input aria-label=${"Layer "+(i+1)+" period"} type="number" step="any" .value=${String(l.effect.period_seconds)} ?disabled=${formLocked} @input=${(e:Event)=>this.setLeaf(i,{period_seconds:(e.target as HTMLInputElement).valueAsNumber})}></label>
+                <label>Brightness <input type="range" min="0" max="1" step=".01" .value=${String(l.effect.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.setLeaf(i,{brightness:(e.target as HTMLInputElement).valueAsNumber})}> ${Math.round(l.effect.brightness*100)}%</label>
+                <label>Scanner width <input type="number" min=".01" max="1" step=".01" .value=${String(l.effect.width)} ?disabled=${formLocked} @input=${(e:Event)=>this.setLeaf(i,{width:(e.target as HTMLInputElement).valueAsNumber})}></label>
+                <label>Opacity <input type="range" min="0" max="1" step=".01" .value=${String(l.opacity)} ?disabled=${formLocked} @input=${(e:Event)=>this.setLayer(i,{opacity:(e.target as HTMLInputElement).valueAsNumber})}> ${Math.round(l.opacity*100)}%</label>
+                <label>Blend <select aria-label=${"Layer "+(i+1)+" blend"} .value=${l.blend} ?disabled=${formLocked} @change=${(e:Event)=>this.setLayer(i,{blend:(e.target as HTMLSelectElement).value as Layer["blend"]})}><option value="over">Over</option><option value="add">Add</option><option value="max">Maximum</option></select></label>
+                <button aria-label=${"Move layer "+(i+1)+" down"} ?disabled=${formLocked||i===0} @click=${()=>this.moveLayer(i,-1)}>Move down</button> <button aria-label=${"Move layer "+(i+1)+" up"} ?disabled=${formLocked||i===this.layers.length-1} @click=${()=>this.moveLayer(i,1)}>Move up</button> <button aria-label=${"Remove layer "+(i+1)} ?disabled=${formLocked} @click=${()=>this.layers=this.layers.filter((_,j)=>i!==j)}>Remove</button>
+              </article>`)}
+              <button ?disabled=${formLocked} @click=${()=>this.addLayer()}>Add layer</button></section>`:nothing}
             <label>Brightness <input type="range" min="0" max="1" step="0.01" .value=${String(this.brightness)} ?disabled=${formLocked} @input=${(e:Event)=>this.brightness=(e.target as HTMLInputElement).valueAsNumber}> <output>${Math.round(this.brightness*100)}%</output></label>
             ${physical?html`<label>Stop behaviour <select .value=${this.stopPolicy} ?disabled=${formLocked} @change=${(e:Event)=>this.stopPolicy=(e.target as HTMLSelectElement).value as StopPolicy}><option value="restore">Restore original state</option><option value="hold">Hold last state</option><option value="off">Turn off</option></select></label>`:nothing}
             ${paths.length?html`<label>Spatial effect path <select aria-label="Spatial effect path" .value=${this.spatialPath} ?disabled=${formLocked} @change=${(e:Event)=>this.spatialPath=(e.target as HTMLSelectElement).value}><option value="">Ordered lamps</option>${paths.map(p=>html`<option value=${p.floorplan_id+"/"+p.path_id} ?disabled=${!p.positions}>${p.name}${p.positions?"":" · missing placements"}</option>`)}</select></label>`:nothing}
             <h3>Lamps · ${this.chosen.length} selected</h3>
             ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||blocked.has(l.id)||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${blocked.has(l.id)?"Recovery required":locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small></span></label>`):html`<p>No registered lights available.</p>`}
-            <button class="primary" ?disabled=${!this.online||this.busy||fault||this.chosen.some(id=>blocked.has(id))||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)||(this.effect==="audio_spectrum"&&!sources.some(s=>s.id===this.audioSource))))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
+            <button class="primary" ?disabled=${!this.online||this.busy||fault||this.chosen.some(id=>blocked.has(id))||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)||(this.needsAudio()&&!sources.some(s=>s.id===this.audioSource))||(this.effect==="layered"&&!this.validLayers())))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>
           <div class="right-stack">
@@ -268,7 +293,7 @@ class LightCadencePanel extends LitElement {
             <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}
           </section>
-        ${sources.length||this.effect==="audio_spectrum"?html`<section aria-labelledby="audio"><h2 id="audio">Audio analysis</h2><p>Local PCM · arrival clock only, playback synchronization unverified</p>${sources.length?sources.map(s=>html`<article><h3>${s.name}</h3><p>${s.status==="live"?"Live":s.status==="lost"?"Source lost — fading to ambient":"Waiting for PCM"} · BPM ${s.bpm??"—"} · ${s.beat_count} onsets</p>${s.bands?.map((v,i)=>html`<label>${["Bass","Mid","Treble"][i]} <meter min="0" max="1" .value=${v}>${Math.round(v*100)}%</meter></label>`)}</article>`):html`<p>No local audio source connected.</p>`}</section>`:nothing}
+        ${sources.length||this.needsAudio()?html`<section aria-labelledby="audio"><h2 id="audio">Audio analysis</h2><p>Local PCM · arrival clock only, playback synchronization unverified</p>${sources.length?sources.map(s=>html`<article><h3>${s.name}</h3><p>${s.status==="live"?"Live":s.status==="lost"?"Source lost — fading to ambient":"Waiting for PCM"} · BPM ${s.bpm??"—"} · ${s.beat_count} onsets</p>${s.bands?.map((v,i)=>html`<label>${["Bass","Mid","Treble"][i]} <meter min="0" max="1" .value=${v}>${Math.round(v*100)}%</meter></label>`)}</article>`):html`<p>No local audio source connected.</p>`}</section>`:nothing}
         ${physical&&(fault||recovery.length)?html`<section aria-labelledby="recovery"><h2 id="recovery">Recovery required</h2><p>Interrupted shows are never restarted automatically. Check the actual lamp before choosing to keep its current state or explicitly restore its recorded original state. Restoring may overwrite changes made outside LightCadence.</p>${fault?html`<p role="alert">Journal unavailable. New starts and manual actions are blocked. Inspect local storage and restart safely.</p>`:nothing}${recovery.map(r=>html`<article><h3>${this.name(r.device_id)}</h3><p>Recorded: ${r.original.power?"On":"Off"} · ${Math.round(r.original.target.brightness*100)}% · ${r.policy}</p><p>${r.binding_matches?"Identity will be rechecked":"Binding changed — recovery blocked"}</p>${(["keep","restore"] as const).map(decision=>html`<button ?disabled=${!this.online||this.busy||fault||!r.binding_matches||!this.catalog?.lights.some(l=>l.id===r.device_id)} @click=${()=>this.snapshot&&this.send({op:"recover",instance_id:this.snapshot.instance_id,device_id:r.device_id,record_id:r.record_id,decision})}>${decision==="keep"?"Keep current state":"Restore recorded state"}</button> `)}</article>`)}</section>`:nothing}
         ${physical?html`<section class="manual" aria-labelledby="manual"><h2 id="manual">Manual lamp control</h2><p>Take the selected lamp out of any running show before changing it. Other lamps continue. No automatic retry after an uncertain result.</p>
           <label>Manual lamp <select aria-label="Manual lamp" .value=${this.manualDevice} ?disabled=${this.busy||!!this.pendingManual} @change=${(e:Event)=>this.manualDevice=(e.target as HTMLSelectElement).value}><option value="">Select a lamp</option>${this.catalog?.lights.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>

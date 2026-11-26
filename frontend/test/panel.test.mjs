@@ -289,4 +289,35 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.spatialCalls.at(-1).positions),{a:0,b:.8});
     await page.close();
   });
+  await test("layer stack editing, order and explicit start",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.layerCalls=[];
+      const state={schema_version:1,instance_id:"layers",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.layerCalls.push(structuredClone(msg.payload));state.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Layers");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("layered");
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add layer"}).click();
+    await page.getByRole("button",{name:"Add layer"}).click();
+    await page.getByLabel("Layer 2 effect",{exact:true}).selectOption("scanner");
+    await page.getByLabel("Layer 2 blend",{exact:true}).selectOption("add");
+    await page.getByRole("button",{name:"Move layer 2 down"}).click();
+    assert.equal(await page.getByLabel("Layer 1 effect",{exact:true}).inputValue(),"scanner");
+    assert.equal(await page.evaluate(()=>window.layerCalls.length),0);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Layers",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.layerCalls[0].effect.layers.map(l=>[l.effect.kind,l.blend])),[["scanner","add"],["static","over"]]);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

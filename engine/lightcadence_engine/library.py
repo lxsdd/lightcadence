@@ -10,7 +10,7 @@ import tempfile
 from uuid import UUID, uuid4
 
 from .chroma import _unique_pairs
-from .effects import Effect, EffectKind
+from .effects import decode_effect, encode_preset
 from .sessions import StaleRevision, StopPolicy
 from .spatial import geometry, spatial_paths
 
@@ -35,17 +35,7 @@ def members(value):
 
 
 def effect(value):
-    exact(value, ("kind", "period_seconds", "brightness", "color", "width"))
-    if not isinstance(value["color"], (list, tuple)):
-        raise ValueError("invalid color")
-    params = {**value, "kind": EffectKind(value["kind"]), "color": tuple(value["color"])}
-    # Audio source IDs are ephemeral. Choose a live source explicitly at launch.
-    spec = Effect(**params, audio_source="selection-required" if params["kind"] is EffectKind.AUDIO_SPECTRUM else None)
-    data = asdict(spec)
-    data.pop("audio_source")
-    data["kind"] = spec.kind.value
-    data["color"] = list(spec.color)
-    return data
+    return encode_preset(decode_effect(value, template=True))
 
 
 class ProjectLibrary:

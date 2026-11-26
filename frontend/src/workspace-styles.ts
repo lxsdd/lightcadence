@@ -61,6 +61,9 @@ export const workspaceStyles=css`
   button.primary{margin-top:12px;background:var(--primary-color,#237db8);color:var(--text-primary-color,white)}
   button:disabled{opacity:.5;cursor:not-allowed}
   button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--primary-color,#48a9e8);outline-offset:2px}
+  .timeline-controls{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin-block:8px}
+  .timeline-controls form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;flex:1 1 15rem;min-width:0}
+  .timeline-controls form label{flex:1 1 8rem;min-width:0;margin:0}
   .target button{flex:0 0 auto}
   .swatch{width:32px;height:32px;flex:none;border:1px solid var(--divider-color,#657080);border-radius:50%}
   /* Do not lock or clip content vertically: the HA page is the scroll owner.

@@ -12,7 +12,7 @@ from time import monotonic
 from uuid import uuid4
 from typing import Callable, Mapping
 
-from .effects import Effect, LightTarget
+from .effects import Effect, EffectKind, LightTarget
 
 
 class SessionError(ValueError):
@@ -101,6 +101,10 @@ class _Session:
     pending_stop: dict[str, StopIntent] = field(default_factory=dict)
     stop_failed: set[str] = field(default_factory=set)
     last_target_time: float | None = None
+    timeline_anchor: float | None = None
+    timeline_offset: float = 0.
+    timeline_paused: bool = False
+    frozen_audio: tuple[float, float, float] | None = None
 
     def snapshot(self) -> SessionSnapshot:
         return SessionSnapshot(
@@ -212,6 +216,60 @@ class SessionManager:
         session.stop_failed.discard(device_id)
         self._mailboxes.pop(device_id, None)
 
+    def _timeline_elapsed(self, session, at):
+        anchor = session.started_at if session.timeline_anchor is None else session.timeline_anchor
+        elapsed = session.timeline_offset + (0. if session.timeline_paused else max(0., at - anchor))
+        return elapsed if session.effect.loop else min(elapsed, session.effect.duration)
+
+    def timeline_state(self, session_id):
+        session = self._get(session_id)
+        if session.effect.kind is not EffectKind.TIMELINE or session.phase is Phase.STOPPED:
+            return None
+        duration = session.effect.duration
+        elapsed = self._timeline_elapsed(session, self._clock())
+        return {"duration": duration, "playhead": elapsed % duration if session.effect.loop else elapsed,
+                "ended": not session.effect.loop and elapsed >= duration, "loop": session.effect.loop,
+                "paused": session.timeline_paused}
+
+    def timeline_control(self, session_id, revision, action, position=None):
+        session = self._revision(session_id, revision)
+        if session.phase is not Phase.RUNNING or session.effect.kind is not EffectKind.TIMELINE:
+            raise SessionError("timeline session not controllable")
+        now = self._clock()
+        if (not isfinite(now) or now < session.started_at
+                or (session.last_target_time is not None and now < session.last_target_time)):
+            raise SessionError("invalid engine clock")
+        elapsed = self._timeline_elapsed(session, now)
+        if action == "seek":
+            if (type(position) not in (int, float) or not isfinite(position)
+                    or not 0 <= position <= session.effect.duration):
+                raise SessionError("seek outside timeline")
+            elapsed = float(position)
+        elif action == "pause":
+            if position is not None or session.timeline_paused:
+                raise SessionError("timeline already paused or invalid position")
+            audio = (self.audio_provider(session.effect.audio_source, now)
+                     if self.audio_provider is not None and session.effect.audio_source is not None else None)
+            session.frozen_audio = tuple(audio) if audio is not None else None
+            session.timeline_paused = True
+        elif action == "resume":
+            if position is not None or not session.timeline_paused:
+                raise SessionError("timeline not paused or invalid position")
+            session.timeline_paused = False
+            session.frozen_audio = None
+        else:
+            raise SessionError("unknown timeline action")
+        session.timeline_offset = elapsed % session.effect.duration if session.effect.loop else elapsed
+        session.timeline_anchor = now
+        session.revision += 1
+        session.generation += 1
+        # Invalidate queued old-position frames before new rendering. No new
+        # owner or device writer; physical coordinator serializes in-flight I/O.
+        for device in session.positions:
+            self._mailboxes.pop(device, None)
+            session.latest.pop(device, None)
+        return session.snapshot()
+
     def render(self, session_id: str, target_time: float | None = None) -> int:
         session = self._get(session_id)
         if session.phase is not Phase.RUNNING:
@@ -222,11 +280,14 @@ class SessionManager:
             raise SessionError("render time must be finite and monotonic")
         session.last_target_time = at
         session.sequence += 1
-        audio = (self.audio_provider(session.effect.audio_source, at)
+        timeline = session.effect.kind is EffectKind.TIMELINE
+        elapsed = self._timeline_elapsed(session, at) if timeline else at - session.started_at
+        audio = (session.frozen_audio if timeline and session.timeline_paused else
+                 self.audio_provider(session.effect.audio_source, at)
                  if self.audio_provider is not None and session.effect.audio_source is not None else None)
         for device, position in session.positions.items():
             frame = Frame(session.id, session.generation, device, session.sequence,
-                          at, session.effect.render(at - session.started_at, position, audio))
+                          at, session.effect.render(elapsed, position, audio))
             session.latest[device] = frame.sequence
             self._mailboxes[device] = frame
         return len(session.positions)

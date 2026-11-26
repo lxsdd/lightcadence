@@ -89,16 +89,20 @@ class PreviewRuntime:
 
     def session_state(self, session):
         result = asdict(session)
-        if session.effect.kind.value == "timeline" and session.phase is not Phase.STOPPED:
-            duration = session.effect.duration
-            elapsed = max(0., self.clock() - session.started_at)
-            result["timeline"] = {"duration": duration,
-                                  "playhead": elapsed % duration if session.effect.loop else min(elapsed, duration),
-                                  "ended": not session.effect.loop and elapsed >= duration,
-                                  "loop": session.effect.loop}
+        timeline = self.manager.timeline_state(session.id)
+        if timeline is not None:
+            result["timeline"] = timeline
         return result
 
     def command(self, body):
+        if isinstance(body, dict) and body.get("op") == "timeline_control":
+            fields(body, ("op", "session_id", "revision", "action"), ("position",))
+            if (body["action"] == "seek") != ("position" in body):
+                raise ValueError("position required only for seek")
+            self.manager.timeline_control(identity(body["session_id"]), body["revision"],
+                                          body["action"], body.get("position"))
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):
             self.library.command(body)
             return self.state()
@@ -204,6 +208,14 @@ class PhysicalRuntime(PreviewRuntime):
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
+        if isinstance(body, dict) and body.get("op") == "timeline_control":
+            fields(body, ("op", "session_id", "revision", "action"), ("position",))
+            if (body["action"] == "seek") != ("position" in body):
+                raise ValueError("position required only for seek")
+            self.manager.timeline_control(identity(body["session_id"]), body["revision"],
+                                          body["action"], body.get("position"))
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):
             self.library.command(body)
             return self.state()

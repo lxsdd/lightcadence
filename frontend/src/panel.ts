@@ -8,7 +8,7 @@ import type {Plan,SpatialPath} from "./floorplan";
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
-type Session = {timeline?:{duration:number;playhead:number;ended:boolean;loop:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string}};
+type Session = {timeline?:{duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number};
@@ -23,7 +23,8 @@ type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required
 type StopPolicy = "restore" | "hold" | "off";
 type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
-type Command = LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type TimelineControl={op:"timeline_control";instance_id:string;session_id:string;revision:number;action:"pause"|"resume"|"seek";position?:number};
+type Command = TimelineControl | LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum",static:"Static colour",layered:"Layered scene",timeline:"Timeline Studio"};
@@ -132,6 +133,11 @@ class LightCadencePanel extends LitElement {
     } catch(error) {
       if(epoch===this.epoch) {this.online=false; this.entry=undefined; this.status=explain(error);}
     } finally {if(epoch===this.epoch) this.refreshing=false;}
+  }
+  private controlTimeline(s:Session,action:"pause"|"resume"|"seek",position?:number) {
+    if(!this.snapshot||!s.timeline||s.phase!=="running")return;
+    if(action==="seek"&&(position===undefined||!Number.isFinite(position)||position<0||position>s.timeline.duration))return;
+    void this.send({op:"timeline_control",instance_id:this.snapshot.instance_id,session_id:s.id,revision:s.revision,action,...(action==="seek"?{position}:{})});
   }
   private async send(payload: Command) {
     if(!this.hass || !this.entry || !this.online || this.busy) return;
@@ -296,7 +302,12 @@ class LightCadencePanel extends LitElement {
           </section>`:nothing}
           <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
           ${active.length?active.map(s=>html`<article data-phase=${s.phase}><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>${s.effect.audio_source?html`<p>Audio: ${sources.find(a=>a.id===s.effect.audio_source)?.name??"Source disconnected"} · ${sources.find(a=>a.id===s.effect.audio_source)?.status??"ambient"}</p>`:nothing}
-            ${s.timeline?html`<p>Timeline · ${s.timeline.playhead.toFixed(2)} / ${s.timeline.duration.toFixed(2)} s · ${s.timeline.ended?"Ended — stop to release lamps":s.timeline.loop?"Looping":"Playing"}</p><progress aria-label="Timeline playhead" max=${s.timeline.duration} .value=${s.timeline.playhead}></progress>`:nothing}
+            ${s.timeline?html`<p>Timeline · ${s.timeline.playhead.toFixed(2)} / ${s.timeline.duration.toFixed(2)} s · ${s.timeline.ended?"Ended — stop to release lamps":s.timeline.paused?"Paused":s.timeline.loop?"Looping":"Playing"}</p><progress aria-label="Timeline playhead" max=${s.timeline.duration} .value=${s.timeline.playhead}></progress>
+            <div class="timeline-controls"><button ?disabled=${!this.online||this.busy||s.phase!=="running"} @click=${()=>this.controlTimeline(s,s.timeline?.paused?"resume":"pause")}>${s.timeline.paused?"Resume timeline":"Pause timeline"}</button>
+            <button ?disabled=${!this.online||this.busy||s.phase!=="running"} @click=${()=>this.controlTimeline(s,"seek",0)}>Seek to start</button>
+            <form @submit=${(e:SubmitEvent)=>{e.preventDefault();const input=(e.currentTarget as HTMLFormElement).querySelector("input");if(input)this.controlTimeline(s,"seek",input.valueAsNumber);}}>
+            <label>Seek to seconds <input aria-label="Seek to seconds" type="number" required min="0" max=${s.timeline.duration} step="any" ?disabled=${!this.online||this.busy||s.phase!=="running"}></label>
+            <button type="submit" ?disabled=${!this.online||this.busy||s.phase!=="running"}>Seek timeline</button></form></div>`:nothing}
             <div class="targets">${s.devices.map(id=>html`<div class="target"><span class="swatch" style=${"background:"+color(this.snapshot?.targets[id]?.target)}></span><span>${this.name(id)}</span><button title="Remove this lamp from this preview only; other sessions are unaffected" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"detach",session_id:s.id,revision:s.revision,device_id:id})}>Detach</button></div>`)}</div>
             <button class="primary" ?disabled=${!this.online||this.busy} @click=${()=>this.send({op:"stop",session_id:s.id,revision:s.revision})} title="Stop only this preview session">${physical?"Stop show":"Stop preview"}</button>
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}

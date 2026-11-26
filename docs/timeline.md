@@ -13,6 +13,13 @@ Timeline duration is the latest clip end. Looping wraps on server monotonic
 time; one-shot playback goes dark at end and retains leases until explicit Stop
 so the existing restore/hold/off rules remain authoritative. No automatic replay.
 The UI exposes track/clip/key editing and a proportional visual time ruler;
-playhead telemetry is server-derived. No per-track target masks, tempo/marker
-maps, transport seeking, arbitrary curve editing, recorded audio or hardware
-synchronization claimed in this initial block.
+playhead telemetry is server-derived. Pause/resume and explicit seek are
+revisioned, instance-fenced session actions. The same lease remains owned;
+the monotonic timeline clock freezes on pause and resumes from the frozen
+position. Audio-reactive targets freeze the latest band values on pause
+and use current live bands after resume; seek does not seek external audio.
+Old queued frames are invalidated by generation; an already-submitted
+physical frame cannot be recalled, and transport submission is not optical
+confirmation. A seek to the end of a looping timeline wraps to zero.
+One-shot end still requires Stop. No per-track target masks, tempo/marker
+maps, recorded audio or hardware synchronization claimed.

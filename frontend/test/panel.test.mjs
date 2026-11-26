@@ -330,7 +330,10 @@ try {
       const state={schema_version:1,instance_id:"timeline",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
       el.hass={callWS:async msg=>{
         if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
-        if(msg.payload){window.timelineCalls.push(structuredClone(msg.payload));state.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect,timeline:{duration:6,playhead:2,ended:false,loop:true}}];}
+        if(msg.payload){const p=msg.payload;window.timelineCalls.push(structuredClone(p));
+          if(p.op==="start")state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:["a"],effect:p.effect,timeline:{duration:6,playhead:2,ended:false,loop:true,paused:false}}];
+          else if(p.op==="timeline_control"){const s=state.sessions[0];if(p.revision!==s.revision)throw {code:"stale_revision"};s.revision++;if(p.action==="seek")s.timeline.playhead=p.position;else s.timeline.paused=p.action==="pause";}
+        }
         return structuredClone(state);
       }};
     });
@@ -346,12 +349,29 @@ try {
     await page.getByRole("button",{name:"Add keyframe",exact:true}).click();
     await page.getByLabel("Key 1 value",{exact:true}).fill(".2");
     await page.getByLabel("Key 1 value",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    const bar=page.getByRole("button",{name:"Move clip 1/2",exact:true});
+    await bar.scrollIntoViewIfNeeded();
+    const bounds=await bar.boundingBox();
+    await page.mouse.move(bounds.x+bounds.width/2,bounds.y+bounds.height/2);
+    await page.mouse.down();await page.mouse.move(bounds.x+bounds.width/2-30,bounds.y+bounds.height/2,{steps:4});await page.mouse.up();
+    const moved=Number(await page.getByLabel("Clip start",{exact:true}).inputValue());
+    assert.ok(moved>=0&&moved<6);
+    await page.getByRole("button",{name:"Remove clip",exact:true}).click();
     assert.equal(await page.evaluate(()=>window.timelineCalls.length),0);
     await page.getByRole("button",{name:"Start preview"}).click();
     await page.getByRole("heading",{name:"Timeline test",exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>window.timelineCalls[0].effect.tracks[0].clips[0].duration),6);
     assert.equal(await page.evaluate(()=>window.timelineCalls[0].effect.tracks[0].clips[0].keyframes[0].value),.2);
     await page.getByText("Timeline · 2.00 / 6.00 s · Looping",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Pause timeline",exact:true}).click();
+    await page.getByText("Timeline · 2.00 / 6.00 s · Paused",{exact:true}).waitFor();
+    await page.getByLabel("Seek to seconds",{exact:true}).fill("4");
+    await page.getByRole("button",{name:"Seek timeline",exact:true}).click();
+    await page.getByText("Timeline · 4.00 / 6.00 s · Paused",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Resume timeline",exact:true}).click();
+    await page.getByText("Timeline · 4.00 / 6.00 s · Looping",{exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.timelineCalls.slice(1).map(p=>[p.action,p.revision,p.instance_id])),[["pause",1,"timeline"],["seek",2,"timeline"],["resume",3,"timeline"]]);
     await page.close();
   });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

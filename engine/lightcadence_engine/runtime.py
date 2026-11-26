@@ -68,6 +68,10 @@ class PreviewRuntime:
         for session in self.manager.snapshots():
             if session.phase is not Phase.RUNNING:
                 continue
+            if self.manager.auto_end_due(session.id, at):
+                self.manager.begin_stop(session.id, session.revision)
+                self.manager.finish_stop(session.id, self.manager.snapshot(session.id).revision)
+                continue
             self.manager.render(session.id, at)
             for device in session.devices:
                 frame = self.manager.take_latest(device)
@@ -91,6 +95,9 @@ class PreviewRuntime:
         result = asdict(session)
         timeline = self.manager.timeline_state(session.id)
         if timeline is not None:
+            if session.effect.auto_end:
+                timeline["auto_end"] = True
+                timeline["ending"] = session.id in getattr(self, "_ending", {})
             result["timeline"] = timeline
         return result
 
@@ -174,11 +181,21 @@ class PhysicalRuntime(PreviewRuntime):
         self.targets = {}
         self._closing = False
         self._manual = {}
+        self._ending = {}
         self.enrolled_devices = tuple(sorted(p.device_id for p in profiles))
 
     def tick(self):
         if self._closing:
             return
+        at = self.clock()
+        for session in self.manager.snapshots():
+            if self.manager.auto_end_due(session.id, at):
+                # Fence output synchronously, before scheduling one stop transaction.
+                self.manager.begin_stop(session.id, session.revision)
+                revision = self.manager.snapshot(session.id).revision
+                task = asyncio.create_task(self.physical.stop(session.id, revision))
+                self._ending[session.id] = task
+                task.add_done_callback(lambda done, sid=session.id: self._end_done(sid, done))
         self.physical.tick()
         active = {}
         for session in self.manager.snapshots():
@@ -189,6 +206,13 @@ class PhysicalRuntime(PreviewRuntime):
                 if frame is not None and self.manager.frame_is_current(frame):
                     active[device] = asdict(frame)
         self.targets = active
+
+    def _end_done(self, sid, task):
+        self._ending.pop(sid, None)
+        if not task.cancelled():
+            task.exception()
+        # Failed or uncertain stop remains STOPPING; only explicit retry can
+        # repeat it. No auto retry, no release of unconfirmed device leases.
 
     def state(self):
         result = super().state()
@@ -237,7 +261,10 @@ class PhysicalRuntime(PreviewRuntime):
                                        identity(body["device_id"]))
         elif op == "stop":
             fields(body, ("op", "session_id", "revision"))
-            await self.physical.stop(identity(body["session_id"]), body["revision"])
+            sid = identity(body["session_id"])
+            if sid in self._ending:
+                raise ValueError("automatic stop in progress")
+            await self.physical.stop(sid, body["revision"])
         elif op == "recover":
             fields(body, ("op", "device_id", "record_id", "decision"))
             manual_result = await self.physical.recover(identity(body["device_id"]),
@@ -278,6 +305,8 @@ class PhysicalRuntime(PreviewRuntime):
         # restore on shutdown: durable entries remain for explicit recovery.
         self._closing = True
         try:
+            if self._ending:
+                await asyncio.gather(*tuple(self._ending.values()), return_exceptions=True)
             await self.physical.close()
         finally:
             self.library.close()

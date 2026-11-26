@@ -48,6 +48,7 @@ class Effect:
     layers: tuple['Layer', ...] = ()
     tracks: tuple['Track', ...] = ()
     loop: bool = True
+    auto_end: bool = False
 
     def __post_init__(self):
         if not isinstance(self.kind, EffectKind):
@@ -66,6 +67,8 @@ class Effect:
             raise ValueError("invalid layers")
         if type(self.loop) is not bool or not isinstance(self.tracks, tuple) or not all(isinstance(t, Track) for t in self.tracks):
             raise ValueError("invalid timeline")
+        if type(self.auto_end) is not bool or (self.auto_end and (self.kind is not EffectKind.TIMELINE or self.loop)):
+            raise ValueError("automatic stop requires a one-shot timeline")
         if self.kind is EffectKind.TIMELINE:
             if not self.tracks or not any(t.clips for t in self.tracks) or self.layers:
                 raise ValueError("timeline requires clips, not layers")
@@ -95,7 +98,20 @@ class Effect:
     def duration(self):
         return max((c.start + c.duration for t in self.tracks for c in t.clips), default=0.)
 
-    def render(self, elapsed: float, position: float, audio=None) -> LightTarget:
+    def validate_targets(self, devices):
+        selected = set(devices)
+        groups = self.layers if self.kind is EffectKind.LAYERED else self.tracks if self.kind is EffectKind.TIMELINE else ()
+        covered = set()
+        for group in groups:
+            mask = group.devices
+            if mask is not None and not set(mask) <= selected:
+                raise ValueError("effect targets outside selected zone")
+            if not isinstance(group, Track) or group.clips:
+                covered.update(selected if mask is None else mask)
+        if groups and covered != selected:
+            raise ValueError("every selected lamp must belong to a nonempty layer or track")
+
+    def render(self, elapsed: float, position: float, audio=None, device_id=None) -> LightTarget:
         if (not isfinite(elapsed) or elapsed < 0 or
                 not isfinite(position) or not 0 <= position <= 1):
             raise ValueError("invalid elapsed time or position")
@@ -108,6 +124,8 @@ class Effect:
             at = elapsed % duration if self.loop else elapsed
             rgb = (0., 0., 0.)
             for track in self.tracks:
+                if track.devices is not None and device_id not in track.devices:
+                    continue
                 for clip in track.clips:
                     local = at - clip.start
                     if 0 <= local < clip.duration:
@@ -120,6 +138,8 @@ class Effect:
         if self.kind is EffectKind.LAYERED:
             rgb = (0., 0., 0.)
             for layer in self.layers:
+                if layer.devices is not None and device_id not in layer.devices:
+                    continue
                 target = layer.effect.render(elapsed, position, audio)
                 rgb = blend_linear(rgb, target, layer.opacity, layer.blend)
             peak = max(rgb)
@@ -157,8 +177,10 @@ class Layer:
     effect: Effect
     opacity: float = 1.
     blend: Blend = Blend.OVER
+    devices: tuple[str, ...] | None = None
 
     def __post_init__(self):
+        validate_mask(self.devices)
         if not isinstance(self.effect, Effect) or self.effect.kind in (EffectKind.LAYERED, EffectKind.TIMELINE):
             raise ValueError("invalid layer effect")
         if type(self.opacity) not in (int, float) or not isfinite(self.opacity) or not 0 <= self.opacity <= 1:
@@ -195,6 +217,7 @@ class Clip:
                 or self.duration <= 0 or not isfinite(self.start + self.duration)
                 or self.start + self.duration <= self.start
                 or self.fade_in + self.fade_out > self.duration or not isinstance(self.layer, Layer)
+                or self.layer.devices is not None
                 or not isinstance(self.keyframes, tuple)
                 or not all(isinstance(k, Keyframe) and k.time <= self.duration for k in self.keyframes)
                 or any(a.time >= b.time for a, b in zip(self.keyframes, self.keyframes[1:]))):
@@ -223,11 +246,30 @@ class Clip:
 class Track:
     name: str
     clips: tuple[Clip, ...]
+    devices: tuple[str, ...] | None = None
 
     def __post_init__(self):
+        validate_mask(self.devices)
         if (not isinstance(self.name, str) or not self.name.strip()
                 or not isinstance(self.clips, tuple) or not all(isinstance(c, Clip) for c in self.clips)):
             raise ValueError("invalid track")
+
+
+def validate_mask(mask):
+    if mask is not None and (not isinstance(mask, tuple) or not mask
+            or not all(isinstance(d, str) and d.strip() for d in mask)
+            or len(set(mask)) != len(mask)):
+        raise ValueError("invalid device mask")
+
+
+def decode_mask(obj):
+    if "devices" not in obj:
+        return None
+    if not isinstance(obj["devices"], list):
+        raise ValueError("device mask must be a list")
+    result = tuple(obj["devices"])
+    validate_mask(result)
+    return result
 
 
 def blend_linear(base, target, opacity, blend):
@@ -246,7 +288,7 @@ def blend_linear(base, target, opacity, blend):
 def decode_effect(value, *, template=False):
     """Shared API/preset parser. Persisted presets never contain live source IDs."""
     base = {"kind", "period_seconds", "brightness", "color", "width"}
-    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"layers", "tracks", "loop"} | (set() if template else {"audio_source"}):
+    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"layers", "tracks", "loop", "auto_end"} | (set() if template else {"audio_source"}):
         raise ValueError("invalid effect fields")
     if template and not base <= value.keys():
         raise ValueError("incomplete preset")
@@ -255,7 +297,8 @@ def decode_effect(value, *, template=False):
     raw_layers = params.pop("layers", None)
     raw_tracks = params.pop("tracks", None)
     loop = params.pop("loop", True)
-    if kind is not EffectKind.TIMELINE and ("tracks" in value or "loop" in value):
+    auto_end = params.pop("auto_end", False)
+    if kind is not EffectKind.TIMELINE and ("tracks" in value or "loop" in value or "auto_end" in value):
         raise ValueError("timeline fields require timeline effect")
     if "color" in params:
         if not isinstance(params["color"], list):
@@ -267,7 +310,7 @@ def decode_effect(value, *, template=False):
         source = params.get("audio_source")
         tracks = []
         for track in raw_tracks:
-            if not isinstance(track, dict) or set(track) != {"name", "clips"} or not isinstance(track["clips"], list):
+            if not isinstance(track, dict) or not {"name", "clips"} <= track.keys() or not track.keys() <= {"name", "clips", "devices"} or not isinstance(track["clips"], list):
                 raise ValueError("invalid timeline track")
             clips = []
             for raw in track["clips"]:
@@ -292,15 +335,15 @@ def decode_effect(value, *, template=False):
                     keys.append(Keyframe(**key))
                 clips.append(Clip(raw["start"], raw["duration"], Layer(decode_effect(child), layer["opacity"], Blend(layer["blend"])),
                                   raw["fade_in"], raw["fade_out"], tuple(keys)))
-            tracks.append(Track(track["name"], tuple(clips)))
-        params.update(tracks=tuple(tracks), loop=loop, audio_source=source)
+            tracks.append(Track(track["name"], tuple(clips), decode_mask(track)))
+        params.update(tracks=tuple(tracks), loop=loop, auto_end=auto_end, audio_source=source)
     elif kind is EffectKind.LAYERED:
         if not isinstance(raw_layers, list) or not raw_layers:
             raise ValueError("select layers")
         source = params.get("audio_source")
         layers = []
         for raw in raw_layers:
-            if not isinstance(raw, dict) or set(raw) != {"effect", "opacity", "blend"}:
+            if not isinstance(raw, dict) or not {"effect", "opacity", "blend"} <= raw.keys() or not raw.keys() <= {"effect", "opacity", "blend", "devices"}:
                 raise ValueError("invalid layer fields")
             child = raw["effect"]
             if not isinstance(child, dict) or set(child) != base or child["kind"] in ("layered", "timeline"):
@@ -309,7 +352,7 @@ def decode_effect(value, *, template=False):
                 if template:
                     source = "selection-required"
                 child = {**child, "audio_source": source}
-            layers.append(Layer(decode_effect(child), raw["opacity"], Blend(raw["blend"])))
+            layers.append(Layer(decode_effect(child), raw["opacity"], Blend(raw["blend"]), decode_mask(raw)))
         params.update(layers=tuple(layers), audio_source=source)
     elif raw_layers is not None:
         raise ValueError("layers require layered effect")
@@ -323,10 +366,12 @@ def encode_preset(spec):
               "brightness": spec.brightness, "color": list(spec.color), "width": spec.width}
     if spec.kind is EffectKind.LAYERED:
         result["layers"] = [{"effect": encode_preset(layer.effect), "opacity": layer.opacity,
-                             "blend": layer.blend.value} for layer in spec.layers]
+                             "blend": layer.blend.value, **({"devices": list(layer.devices)} if layer.devices is not None else {})} for layer in spec.layers]
     if spec.kind is EffectKind.TIMELINE:
         result["loop"] = spec.loop
-        result["tracks"] = [{"name": t.name, "clips": [{"start": c.start, "duration": c.duration,
+        if spec.auto_end:
+            result["auto_end"] = True
+        result["tracks"] = [{"name": t.name, **({"devices": list(t.devices)} if t.devices is not None else {}), "clips": [{"start": c.start, "duration": c.duration,
             "fade_in": c.fade_in, "fade_out": c.fade_out, "layer": {"effect": encode_preset(c.layer.effect),
             "opacity": c.layer.opacity, "blend": c.layer.blend.value},
             "keyframes": [{"time": k.time, "value": k.value, "curve": k.curve} for k in c.keyframes]}

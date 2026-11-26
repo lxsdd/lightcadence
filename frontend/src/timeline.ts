@@ -3,16 +3,17 @@ import {LitElement, html, css} from "lit";
 type Leaf={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
 type Key={time:number;value:number;curve:"linear"|"hold"|"smooth"};
 type Clip={start:number;duration:number;fade_in:number;fade_out:number;layer:{effect:Leaf;opacity:number;blend:"over"|"add"|"max"};keyframes:Key[]};
-export type Track={name:string;clips:Clip[]};
+export type Track={name:string;clips:Clip[];devices?:string[]};
 
 class TimelineEditor extends LitElement {
-  static properties={tracks:{attribute:false},loop:{type:Boolean},locked:{type:Boolean},selected:{state:true}};
+  static properties={tracks:{attribute:false},loop:{type:Boolean},locked:{type:Boolean},lamps:{attribute:false},selected:{state:true}};
   declare tracks:Track[];
   declare loop:boolean;
   declare locked:boolean;
   declare selected:string;
+  declare lamps:{id:string;name:string}[];
   private drag?:{pointer:number;bar:HTMLElement;tracks:Track[];i:number;j:number;x:number;start:number;duration:number;total:number;width:number;next:number};
-  constructor(){super();this.tracks=[];this.loop=true;this.locked=false;this.selected="";}
+  constructor(){super();this.tracks=[];this.loop=true;this.locked=false;this.lamps=[];this.selected="";}
   private change(tracks:Track[],loop=this.loop){
     if(this.locked)return;
     this.dispatchEvent(new CustomEvent("timeline-change",{detail:{tracks,loop},bubbles:true,composed:true}));
@@ -59,9 +60,12 @@ class TimelineEditor extends LitElement {
     const [i,j]=this.selected.split("/").map(Number),clip=this.selected?this.tracks[i]?.clips[j]:undefined;
     return html`<section aria-label="Timeline editor"><h3>Timeline Studio</h3><p>Seconds · tracks and clips mix bottom to top in list order. Overlapping clips use fades and blend rules. No output until explicit start. Drag a clip within the ruler (0.1 s snap); use the numeric inspector to extend the timeline.</p>
     <label class="inline"><input type="checkbox" .checked=${this.loop} ?disabled=${this.locked} @change=${(e:Event)=>this.change(this.tracks,(e.target as HTMLInputElement).checked)}> Loop timeline</label>
-    <p>Duration: ${duration.toFixed(2)} s. One-shot playback ends dark and retains lamps until Stop.</p>
+    <p>Duration: ${duration.toFixed(2)} s. Set an explicit end action below the timeline.</p>
     <div class="ruler">${[0,.25,.5,.75,1].map(f=>html`<span>${(total*f).toFixed(1)} s</span>`)}</div>
     ${this.tracks.map((t,ti)=>html`<article><label>Track name <input aria-label=${"Track "+(ti+1)+" name"} .value=${t.name} ?disabled=${this.locked} @change=${(e:Event)=>this.edit(ts=>ts[ti].name=(e.target as HTMLInputElement).value)}></label>
+      <p>Targets: ${t.devices===undefined?"All selected lamps":t.devices.length+" specific lamps"}</p>
+      <button ?disabled=${this.locked||(!this.lamps.length&&t.devices===undefined)} @click=${()=>this.edit(ts=>{if(ts[ti].devices===undefined)ts[ti].devices=this.lamps.map(l=>l.id);else delete ts[ti].devices;})}>${t.devices===undefined?"Choose track lamps":"Use all track lamps"}</button>
+      ${t.devices!==undefined?html`<div class="actions" aria-label=${"Track "+(ti+1)+" lamp targets"}>${[...this.lamps,...t.devices.filter(id=>!this.lamps.some(l=>l.id===id)).map(id=>({id,name:"Outside selection: "+id}))].map(l=>html`<button aria-label=${"Track "+(ti+1)+" target "+l.name} aria-pressed=${t.devices?.includes(l.id)===true} ?disabled=${this.locked} @click=${()=>this.edit(ts=>{const ds=ts[ti].devices??[];ts[ti].devices=ds.includes(l.id)?ds.filter(d=>d!==l.id):[...ds,l.id];})}>${l.name}</button>`)}</div>`:""}
       <div class="lane" aria-label=${"Track "+(ti+1)+" time ruler"}>${t.clips.map((c,ci)=>html`<div class="cliprow"><button type="button" class="clipbar" aria-label=${"Move clip "+(ti+1)+"/"+(ci+1)} title="Drag to move in time; numeric editing can extend the ruler" ?disabled=${this.locked} style=${"margin-inline-start:"+Math.min(100,Math.max(0,c.start/total*100||0))+"%;width:"+Math.min(100,Math.max(0,c.duration/total*100||0))+"%"} @pointerdown=${(e:PointerEvent)=>this.dragStart(e,ti,ci,total)} @pointermove=${(e:PointerEvent)=>this.dragMove(e)} @pointerup=${(e:PointerEvent)=>{this.dragMove(e);this.dragEnd(e,true);}} @pointercancel=${(e:PointerEvent)=>this.dragEnd(e,false)} @lostpointercapture=${(e:PointerEvent)=>this.dragEnd(e,false)} @click=${()=>this.selected=ti+"/"+ci}></button></div>`)}</div>
       <div class="actions">${t.clips.map((c,ci)=>html`<button aria-pressed=${this.selected===ti+"/"+ci} ?disabled=${this.locked} @click=${()=>this.selected=ti+"/"+ci}>Clip ${ci+1}: ${c.layer.effect.kind} · ${c.start} s</button>`)}
         <button ?disabled=${this.locked} @click=${()=>this.addClip(ti)}>Add clip</button>

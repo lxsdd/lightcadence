@@ -23,3 +23,26 @@ physical frame cannot be recalled, and transport submission is not optical
 confirmation. A seek to the end of a looping timeline wraps to zero.
 One-shot end still requires Stop. No per-track target masks, tempo/marker
 maps, recorded audio or hardware synchronization claimed.
+
+
+## Target masks and optional end action
+
+A layer or timeline track can omit its devices field to target the entire
+selected zone or specify a nonempty ordered list of stable registry IDs.
+Masks cannot reference outside the chosen zone; the union of actual layers
+or nonempty tracks must cover the selected devices. Validation happens
+before device I/O or lease acquisition. Changes to a stored zone that would
+invalidate a scene are rejected. Detach still removes the actual lease; a
+mask cannot re-enroll a detached lamp. Missing masks in existing presets
+retain their previous semantics. Clip-local masks are not supported.
+
+The optional auto_end flag is valid only on a non-looping timeline. Default
+remains the previous dark target and explicit Stop. With auto_end enabled,
+the monotonic end (including a seek while playing or resume at the end)
+fences queued output and initiates the existing stop policy once. Pause at
+the end does not release the lease until resumed. HOLD retains the last
+submitted light state, not a guaranteed optical state at the exact endpoint.
+RESTORE/OFF require the original confirmed stop/readback path; an uncertain
+stop remains STOPPING and can only be retried explicitly. Already submitted
+frames and external LAN/HA clients are not fenced by the local engine.
+Preview only releases virtual leases. No new hardware evidence.

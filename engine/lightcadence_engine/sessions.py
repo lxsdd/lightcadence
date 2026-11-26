@@ -165,6 +165,7 @@ class SessionManager:
             self._identity(device)
             if not isinstance(state, DeviceState):
                 raise SessionError("invalid original device state")
+        effect.validate_targets(originals)
         if positions is None:
             coordinates = {d: i / max(1, len(originals) - 1)
                            for i, d in enumerate(originals)}
@@ -231,6 +232,12 @@ class SessionManager:
                 "ended": not session.effect.loop and elapsed >= duration, "loop": session.effect.loop,
                 "paused": session.timeline_paused}
 
+    def auto_end_due(self, session_id, at):
+        session = self._get(session_id)
+        return (session.phase is Phase.RUNNING and session.effect.kind is EffectKind.TIMELINE
+                and session.effect.auto_end and not session.timeline_paused
+                and self._timeline_elapsed(session, at) >= session.effect.duration)
+
     def timeline_control(self, session_id, revision, action, position=None):
         session = self._revision(session_id, revision)
         if session.phase is not Phase.RUNNING or session.effect.kind is not EffectKind.TIMELINE:
@@ -287,7 +294,7 @@ class SessionManager:
                  if self.audio_provider is not None and session.effect.audio_source is not None else None)
         for device, position in session.positions.items():
             frame = Frame(session.id, session.generation, device, session.sequence,
-                          at, session.effect.render(elapsed, position, audio))
+                          at, session.effect.render(elapsed, position, audio, device))
             session.latest[device] = frame.sequence
             self._mailboxes[device] = frame
         return len(session.positions)

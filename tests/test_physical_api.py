@@ -233,3 +233,35 @@ class PhysicalApiTests(unittest.IsolatedAsyncioTestCase):
         await self.server.close()
         self.assertFalse(self.runtime.physical._adapters["lamp"].transport.ready)
         self.assertEqual(self.authority.writes, [])
+
+    async def test_auto_end_unconfirmed_never_retries_until_explicit_stop(self):
+        leaf={"kind":"static","period_seconds":4,"brightness":1,"color":[1,0,0],"width":.25}
+        raw={**leaf,"kind":"timeline","loop":False,"auto_end":True,"tracks":[
+            {"name":"Test","devices":["lamp"],"clips":[{"start":0,"duration":60,
+             "fade_in":0,"fade_out":0,"keyframes":[],"layer":{"effect":leaf,"opacity":1,"blend":"over"}}]}]}
+        task=asyncio.create_task(self.request({**self.start_body(),"effect":raw}))
+        msg,addr=await self.receive()
+        self.assertEqual(msg["method"],"udp_sess_new")
+        self.peer.sendto(json.dumps({"id":msg["id"],"method":"udp_sess_token","params":{"token":"a"*32}}).encode(),addr)
+        code,state=await task
+        self.assertEqual(code,200)
+        s=state["sessions"][0]
+        self.authority.apply=False
+        self.authority.value=DeviceState(False,ORIGINAL.target)
+        code,state=await self.request(dict(op="timeline_control",session_id=s["id"],revision=s["revision"],action="seek",position=60.))
+        self.assertEqual(code,200)
+        async with asyncio.timeout(2):
+            while self.runtime._ending:
+                await asyncio.sleep(.01)
+        self.assertEqual(self.authority.writes,[ORIGINAL])
+        self.assertEqual(self.runtime.manager.owner("lamp"),s["id"])
+        for _ in range(5):
+            self.runtime.tick()
+            await asyncio.sleep(0)
+        self.assertEqual(self.authority.writes,[ORIGINAL])
+        self.assertEqual(self.runtime.manager.snapshot(s["id"]).phase,"stopping")
+        self.authority.apply=True
+        code,state=await self.request(dict(op="stop",session_id=s["id"],revision=self.runtime.manager.snapshot(s["id"]).revision))
+        self.assertEqual(code,200)
+        self.assertEqual(state["sessions"][0]["phase"],"stopped")
+        self.assertEqual(self.authority.writes,[ORIGINAL,ORIGINAL])

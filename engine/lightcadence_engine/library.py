@@ -69,6 +69,7 @@ class ProjectLibrary:
             raise ValueError("invalid library version")
         ids = set()
         zones = set()
+        zone_members = {}
         for kind in ("zones", "scenes", "floorplans"):
             if not isinstance(doc[kind], list):
                 raise ValueError("invalid library collection")
@@ -86,10 +87,11 @@ class ProjectLibrary:
                 if kind == "zones":
                     members(obj["devices"])
                     zones.add(obj["id"])
+                    zone_members[obj["id"]] = obj["devices"]
                 elif kind == "scenes":
                     if obj["zone_id"] not in zones:
                         raise ValueError("unknown zone reference")
-                    effect(obj["effect"])
+                    decode_effect(obj["effect"], template=True).validate_targets(zone_members[obj["zone_id"]])
                     StopPolicy(obj["stop_policy"])
                 else:
                     geometry(obj, zones)

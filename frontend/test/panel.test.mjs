@@ -374,4 +374,41 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.timelineCalls.slice(1).map(p=>[p.action,p.revision,p.instance_id])),[["pause",1,"timeline"],["seek",2,"timeline"],["resume",3,"timeline"]]);
     await page.close();
   });
+  await test("track targets and explicit one-shot end action",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.maskCalls=[];
+      const state={schema_version:1,instance_id:"masks",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+        if(msg.payload){const p=msg.payload;window.maskCalls.push(structuredClone(p));state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Masked timeline");
+    await page.getByRole("checkbox").nth(0).check();
+    await page.getByRole("checkbox").nth(1).check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByRole("button",{name:"Choose track lamps",exact:true}).click();
+    await page.getByRole("button",{name:"Track 1 target Lamp b",exact:true}).click();
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).nth(1).click();
+    await page.getByRole("button",{name:"Choose track lamps",exact:true}).click();
+    await page.getByRole("button",{name:"Track 2 target Lamp a",exact:true}).click();
+    await page.getByLabel("Loop timeline",{exact:true}).uncheck();
+    await page.getByLabel("Timeline end action",{exact:true}).selectOption("stop");
+    assert.equal(await page.evaluate(()=>window.maskCalls.length),0);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Masked timeline",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.maskCalls[0].effect.tracks.map(t=>t.devices)),[["a"],["b"]]);
+    assert.equal(await page.evaluate(()=>window.maskCalls[0].effect.auto_end),true);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

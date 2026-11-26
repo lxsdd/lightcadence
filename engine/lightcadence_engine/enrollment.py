@@ -143,6 +143,7 @@ class PhysicalSessions:
             raise SessionError("select unique enrolled devices")
         if not isinstance(effect, Effect) or not isinstance(policy, StopPolicy):
             raise SessionError("invalid effect or stop policy")
+        effect.validate_targets(selected)
         coordinates = None if positions is None else dict(positions)
         if coordinates is not None and (coordinates.keys() != set(selected)
                 or not all(type(v) in (int, float) and isfinite(v) and 0 <= v <= 1

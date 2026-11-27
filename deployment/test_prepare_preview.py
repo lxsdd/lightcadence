@@ -107,6 +107,21 @@ class PreviewDeploymentTests(unittest.TestCase):
                          (self.a / INTEGRATION / "frontend/panel.js").read_bytes())
         self.assertFalse(list(self.backups.iterdir()))
 
+    def test_explicit_hardware_overlay_is_sealed_and_never_implicit(self):
+        overlay = self.a / "compose.hardware-test.yaml"
+        overlay.write_text("synthetic hardware overlay")
+        with self.assertRaises(ValueError):
+            verify(self.a)
+        (self.a / MANIFEST).unlink()
+        with self.assertRaises(ValueError):
+            seal(self.a, "a"*40, "node", "npm")
+        seal(self.a, "a"*40, "node", "npm", hardware_candidate=True)
+        self.assertEqual(verify(self.a)["mode"], "hardware_candidate")
+        overlay.unlink()
+        with self.assertRaises(ValueError):
+            verify(self.a)
+        self.assertEqual(verify(self.b)["mode"], "preview")
+
     def test_prepare_rejects_non_full_commit_before_build(self):
         with self.assertRaises(ValueError):
             prepare(self.root, "main", self.root / "new")

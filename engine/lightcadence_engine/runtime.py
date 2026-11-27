@@ -82,7 +82,7 @@ class PreviewRuntime:
         if self._calibration_cache[0] != key:
             self._calibration_cache = (key, compile_profiles(lib.data["calibrations"]))
         binding = self.device_bindings.get(device)
-        if binding is None:
+        if binding is None or getattr(self, "device_transports", {}).get(device, {}).get("white_kelvin") is not None:
             return target
         profiles = self._calibration_cache[1]
         correction = profiles.get(selector({**binding, "device_id": device})) or profiles.get(selector(binding))
@@ -95,8 +95,11 @@ class PreviewRuntime:
             if any(s.phase is not Phase.STOPPED and self.manager.comparison_state(s.id) is None
                    for s in self.manager.snapshots()) or getattr(getattr(self, "physical", None), "_reserved", set()):
                 raise ValueError("stop ordinary shows before changing calibration")
+            fields(body, ("op", "revision", "kind", "id", "value"))
             if body["op"] == "library_save":
-                sel = body["value"]["selector"]
+                if not isinstance(body["value"], dict):
+                    raise ValueError("invalid calibration value")
+                sel = body["value"].get("selector")
                 selector(sel)
                 device = sel.get("device_id")
                 if device is not None and self.device_bindings.get(device) != {k:v for k,v in sel.items() if k != "device_id"}:
@@ -313,6 +316,39 @@ class PhysicalRuntime(PreviewRuntime):
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
+        if isinstance(body, dict) and body.get("op") == "calibration_project":
+            fields(body, ("op", "revision", "devices", "targets"))
+            if type(body["revision"]) is not int or body["revision"] != self.library.data["revision"]:
+                from .sessions import StaleRevision
+                raise StaleRevision("refresh calibration library")
+            if self.library.fault:
+                raise OSError("library unavailable")
+            devices = body["devices"]
+            if not isinstance(devices, list) or not devices or not all(isinstance(d,str) and d in self.device_bindings for d in devices) or len(set(devices)) != len(devices):
+                raise ValueError("select unique enrolled lights")
+            from .chroma import scene_parameters
+            from .tuya_lan import project_state
+            requested = raw_targets(body["targets"], devices)
+            projected = {}
+            for d, nominal in requested.items():
+                if self.device_transports[d].get("white_kelvin") is not None or nominal.brightness == 0 or max(nominal.red,nominal.green,nominal.blue) == 0:
+                    raise ValueError("initial native export requires nonblack RGB-on targets")
+                target = self.calibrate(d, nominal)
+                if self.device_bindings[d]["transport"] == "tuya_v35":
+                    native = project_state(DeviceState(True, target)).native_hsv
+                    h,s,v = (int(native[i:i+4],16) for i in (0,4,8))
+                    if not v:
+                        raise ValueError("calibrated target quantizes to zero")
+                    attrs = {"state":"on","hs_color":[h,s/10],"brightness":max(1,round(v*255/1000))}
+                    command = {"native_hsv":native}
+                else:
+                    _, value, bright, *_ = scene_parameters(target)
+                    if not value or not round(target.brightness*100):
+                        raise ValueError("calibrated target quantizes to zero")
+                    attrs = {"state":"on","rgb_color":[value>>16,value>>8&255,value&255],"brightness":max(1,round(bright*255/100))}
+                    command = {"rgb":attrs["rgb_color"],"brightness_pct":bright}
+                projected[d] = {"nominal":asdict(nominal),"corrected":asdict(target),"native":command,"ha":attrs}
+            return {**self.state(),"calibration_projection":{"instance_id":self.instance_id,"revision":body["revision"],"targets":projected}}
         if isinstance(body, dict) and body.get("op") == "calibration_start":
             fields(body, ("op", "request_id", "devices", "reference", "targets"))
             devices = body["devices"]

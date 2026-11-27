@@ -84,7 +84,7 @@ def validate_preview_selection(hass, payload):
         if "device_id" not in sel:
             return
         devices = [sel["device_id"]]
-    elif payload.get("op") in ("start", "scene_start", "calibration_start"):
+    elif payload.get("op") in ("start", "scene_start", "calibration_start", "calibration_project"):
         devices = payload.get("devices")
     else:
         return

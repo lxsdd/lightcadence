@@ -30,3 +30,7 @@ white on RGB lamps; native CT mode selection, per-Kelvin curves, physical
 enrollment of dual-mode lamps currently requiring RGB state, HA scene target
 export, multi-client draft recovery, colorimeter support and actual hardware
 acceptance remain open. No household identifiers or values included.
+
+## Read-only native HA target proposals
+
+The physical authenticated command calibration_project uses the current library revision and engine instance fence. It accepts explicit nominal RGB8/brightness targets, applies the same renderer correction and uses the existing native quantization (Yeelight RGB/percent; Tuya HSV/value). The panel shows proposed HA entities JSON from a common goal or from inspected native scene targets. No scene is activated, created or modified. Existing scene targets may already include corrections: never apply a second correction without review. HA integration color-mode conversion and physical fidelity need acceptance; non-RGB/zero targets are rejected. The copied proposal is not a live snapshot of any later scene or profile edits.

@@ -62,6 +62,14 @@ jobs:
           python3 deployment/prepare_preview.py verify "$stage"
           cmp custom_components/lightcadence/frontend/panel.js "$stage/custom_components/lightcadence/frontend/panel.js"
           LIGHTCADENCE_TOKEN_PATH="$RUNNER_TEMP/synthetic-token" docker compose -f "$stage/compose.yaml" config --quiet
+      - name: Prepare and verify explicit hardware candidate bundle (no device I/O)
+        run: |
+          stage="$RUNNER_TEMP/lightcadence-hardware"
+          python3 deployment/prepare_preview.py prepare --repo . --sha "$(git rev-parse HEAD)" --destination "$stage" --hardware-candidate
+          python3 deployment/prepare_preview.py verify "$stage"
+          cmp custom_components/lightcadence/frontend/panel.js "$stage/custom_components/lightcadence/frontend/panel.js"
+          cmp compose.hardware-test.yaml "$stage/compose.hardware-test.yaml"
+          LIGHTCADENCE_TOKEN_PATH="$RUNNER_TEMP/synthetic-token" LIGHTCADENCE_DEVICE_PATH="$RUNNER_TEMP/synthetic-devices" LIGHTCADENCE_JOURNAL_PATH="$RUNNER_TEMP/synthetic-journal" LIGHTCADENCE_LIBRARY_PATH="$RUNNER_TEMP/synthetic-library" docker compose -f "$stage/compose.yaml" -f "$stage/compose.hardware-test.yaml" -f "$stage/compose.library.yaml" config --quiet
       - name: Build local engine container (no publish)
         run: docker build -t lightcadence-ci "$RUNNER_TEMP/lightcadence-preview"
       - name: Compile original engine and HA integration

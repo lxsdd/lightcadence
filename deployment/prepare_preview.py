@@ -18,6 +18,7 @@ import uuid
 MANIFEST = "build-manifest.json"
 INTEGRATION = Path("custom_components/lightcadence")
 ROOT_FILES = (".dockerignore", "Dockerfile", "compose.yaml", "compose.library.yaml")
+HARDWARE_OVERLAY = "compose.hardware-test.yaml"
 REQUIRED = {*ROOT_FILES, "frontend-lock.json", "engine/requirements.txt",
             "engine/lightcadence_engine/server.py", str(INTEGRATION / "manifest.json"),
             str(INTEGRATION / "frontend/panel.js")}
@@ -61,20 +62,24 @@ def unique_pairs(pairs):
     return result
 
 
-def valid_inventory(files):
-    return (isinstance(files, dict) and REQUIRED <= files.keys()
+def valid_inventory(files, mode="preview"):
+    if mode not in ("preview", "hardware_candidate"):
+        return False
+    extra = {HARDWARE_OVERLAY} if mode == "hardware_candidate" else set()
+    return (isinstance(files, dict) and (REQUIRED | extra) <= files.keys()
             and all(isinstance(value, str) and DIGEST.fullmatch(value)
-                    and (name in ROOT_FILES or name == "frontend-lock.json"
+                    and (name in ROOT_FILES or name in extra or name == "frontend-lock.json"
                          or name.startswith("engine/")
                          or name.startswith(str(INTEGRATION) + "/"))
                     for name, value in files.items()))
 
 
-def seal(root, sha, node, npm):
+def seal(root, sha, node, npm, *, hardware_candidate=False):
+    mode = "hardware_candidate" if hardware_candidate else "preview"
     files = inventory(root)
-    if not SHA.fullmatch(sha) or not valid_inventory(files):
+    if not SHA.fullmatch(sha) or not valid_inventory(files, mode):
         raise ValueError("invalid local build layout")
-    doc = {"schema_version": 1, "mode": "preview", "source_sha": sha,
+    doc = {"schema_version": 1, "mode": mode, "source_sha": sha,
            "node": node, "npm": npm, "files": files}
     (root / MANIFEST).write_text(json.dumps(doc, sort_keys=True, indent=2) + "\n",
                                  encoding="utf-8")
@@ -90,10 +95,10 @@ def verify(root):
     if (not isinstance(doc, dict)
             or set(doc) != {"schema_version", "mode", "source_sha", "node", "npm", "files"}
             or type(doc["schema_version"]) is not int or doc["schema_version"] != 1
-            or doc["mode"] != "preview" or not isinstance(doc["source_sha"], str)
+            or doc["mode"] not in ("preview", "hardware_candidate") or not isinstance(doc["source_sha"], str)
             or not SHA.fullmatch(doc["source_sha"])
             or not all(isinstance(doc[k], str) and doc[k] for k in ("node", "npm"))
-            or not valid_inventory(doc["files"])
+            or not valid_inventory(doc["files"], doc["mode"])
             or inventory(root, ignore_manifest=True) != doc["files"]):
         raise ValueError("local build manifest or file integrity mismatch")
     return doc
@@ -103,7 +108,7 @@ def output(args, cwd):
     return subprocess.check_output(args, cwd=cwd, text=True).strip()
 
 
-def prepare(repo, sha, destination):
+def prepare(repo, sha, destination, *, hardware_candidate=False):
     repo = Path(repo).resolve(strict=True)
     destination = Path(destination).absolute()
     if not SHA.fullmatch(sha) or output(["git", "rev-parse", sha + "^{commit}"], repo) != sha:
@@ -137,10 +142,10 @@ def prepare(repo, sha, destination):
         stage.mkdir()
         for folder in (Path("engine"), INTEGRATION):
             shutil.copytree(source / folder, stage / folder)
-        for filename in ROOT_FILES:
+        for filename in ROOT_FILES + ((HARDWARE_OVERLAY,) if hardware_candidate else ()):
             shutil.copyfile(source / filename, stage / filename)
         shutil.copyfile(frontend / "package-lock.json", stage / "frontend-lock.json")
-        doc = seal(stage, sha, node, npm)
+        doc = seal(stage, sha, node, npm, hardware_candidate=hardware_candidate)
         # Exclusive reservation; never overwrite an earlier local build.
         destination.mkdir()
         try:
@@ -213,6 +218,7 @@ def main():
     prep.add_argument("--repo", type=Path, default=Path.cwd())
     prep.add_argument("--sha", required=True)
     prep.add_argument("--destination", type=Path, required=True)
+    prep.add_argument("--hardware-candidate", action="store_true", help="Include explicit hardware test overlay; never activate it")
     check = commands.add_parser("verify")
     check.add_argument("bundle", type=Path)
     install = commands.add_parser("activate-ha")
@@ -223,7 +229,7 @@ def main():
     install.add_argument("--backup-dir", type=Path)
     args = parser.parse_args()
     if args.command == "prepare":
-        result = prepare(args.repo, args.sha, args.destination)
+        result = prepare(args.repo, args.sha, args.destination, hardware_candidate=args.hardware_candidate)
     elif args.command == "verify":
         result = verify(args.bundle)
     else:

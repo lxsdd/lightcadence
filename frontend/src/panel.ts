@@ -3,7 +3,7 @@ import {workspaceStyles} from "./workspace-styles";
 import "./floorplan";
 import "./timeline";
 import "./calibration";
-import type {CalibrationCommand, CalibrationRow} from "./calibration";
+import type {CalibrationCommand, CalibrationRow, Projection} from "./calibration";
 import {validTiming} from "./timeline";
 import type {Track,Timing} from "./timeline";
 import type {Plan,SpatialPath} from "./floorplan";
@@ -25,7 +25,7 @@ type NativeInspection={scene_id:string;entity_id:string;name:string;fingerprint:
 type Scene={ha_source?:{registry_id:string;fingerprint:string};id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
 type Library={calibrations?:CalibrationRow[];floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
 type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes"|"floorplans";id:string|null;value:Record<string,unknown>|null};
-type Snapshot = {calibration_bindings?:Record<string,{model:string;firmware:string;transport:string}>;library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
+type Snapshot = {calibration_projection?:Projection;calibration_bindings?:Record<string,{model:string;firmware:string;transport:string}>;library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
 type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: Timing & {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; brightness_pct: number} & ({rgb:number[]}|{kelvin:number})} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
@@ -61,10 +61,12 @@ class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
     zone:{state:true}, effect:{state:true},layers:{state:true}, tracks:{state:true},timing:{state:true},timelineLoop:{state:true},timelineAutoEnd:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
-    calibrationOpen:{state:true}, busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
+    calibrationOpen:{state:true}, calibrationProjection:{state:true}, nativeProjection:{state:true}, busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
     nativeScenes:{state:true},nativeSelected:{state:true},nativeInspection:{state:true},nativeName:{state:true},manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, manualKelvin:{state:true}, pendingManual:{state:true},
   };
   declare calibrationOpen:boolean;
+  declare calibrationProjection?:Projection;
+  declare nativeProjection?:Projection;
   declare nativeScenes:NativeScene[];
   declare nativeSelected:string;
   declare nativeInspection?:NativeInspection;
@@ -185,6 +187,7 @@ class LightCadencePanel extends LitElement {
       const state=await this.hass.callWS<Snapshot>({type:physical?"lightcadence/physical":"lightcadence/preview",entry_id:this.entry,payload:command});
       if(epoch!==this.epoch) return;
       this.accept(state);
+      if(payload.op==="calibration_project")this.calibrationProjection=state.calibration_projection;
       if((payload.op==="library_save"||payload.op==="library_delete")&&payload.kind==="floorplans"){(this.renderRoot.querySelector("lightcadence-floorplan") as (HTMLElement & {confirmed:()=>void})|null)?.confirmed();}
       if(payload.op==="library_save"||payload.op==="library_delete"){this.spatialPath="";this.selectedZone="";this.selectedScene="";this.loadedLibraryRevision=-1;}
       if(payload.op==="start") this.pendingStart=undefined;
@@ -225,14 +228,16 @@ class LightCadencePanel extends LitElement {
     this.pendingStart=payload;
     void this.send(payload);
   }
-  private async nativeRequest(action:"list"|"inspect"|"import") {
+  private async nativeRequest(action:"list"|"inspect"|"import"|"project") {
     if(!this.hass||!this.entry||!this.online||this.busy||this.pendingStart||this.pendingManual)return;
     const lib=this.snapshot?.library, state=this.snapshot;
     if(!lib||!state)return;
     const inspection=this.nativeInspection, fence=this.nativeFence;
+    if(action==="project"&&(!inspection?.importable||!fence||fence.revision!==lib.revision||fence.instance!==state.instance_id||!state.physical_output_enabled||lib.fault))return;
     if(action==="import"&&(!inspection?.importable||!fence||fence.revision!==lib.revision||fence.instance!==state.instance_id||!this.nativeName.trim()||lib.fault))return;
     const epoch=++this.epoch;this.refreshing=false;this.busy=true;
     try{
+      this.nativeProjection=undefined;
       if(action==="list"){
         this.nativeInspection=undefined;this.nativeFence=undefined;this.nativeSelected="";
         const rows=await this.hass.callWS<NativeScene[]>({type:"lightcadence/ha_scenes"});
@@ -244,6 +249,11 @@ class LightCadencePanel extends LitElement {
         if(epoch!==this.epoch)return;
         this.nativeInspection=item;this.nativeName=item.name;this.nativeFence={revision:lib.revision,instance:state.instance_id};
         this.status=item.importable?"Review saved scene targets before import":"Scene cannot be imported without changing its meaning";
+      }else if(action==="project"&&inspection&&fence){
+        const projected=await this.hass.callWS<Snapshot>({type:"lightcadence/physical",entry_id:this.entry,payload:{op:"calibration_project",instance_id:fence.instance,revision:fence.revision,devices:inspection.targets.map(t=>t.device_id),targets:Object.fromEntries(inspection.targets.map(t=>[t.device_id,{rgb:t.rgb,brightness:t.brightness/255}]))}});
+        if(epoch!==this.epoch)return;
+        this.nativeProjection=projected.calibration_projection;
+        this.status="Calibrated target proposal — no scene or lamp changed";
       }else if(inspection&&fence){
         // No retry after uncertain result. Reinspect and review the library.
         this.nativeInspection=undefined;this.nativeFence=undefined;
@@ -261,12 +271,14 @@ class LightCadencePanel extends LitElement {
     return html`<details><summary>Import native HA scene</summary>
       <p>Read the saved targets, not current light states. Only complete supported RGB-on scenes can be copied; no activation or changes to HA scenes.</p>
       <button ?disabled=${locked} @click=${()=>this.nativeRequest("list")}>Load HA scenes</button>
-      <label>Native HA scene <select aria-label="Native HA scene" .value=${this.nativeSelected} ?disabled=${locked} @change=${(e:Event)=>{this.nativeSelected=(e.target as HTMLSelectElement).value;this.nativeInspection=undefined;this.nativeFence=undefined;}}><option value="">Select a scene</option>${this.nativeScenes.map(s=>html`<option value=${s.id} ?disabled=${!s.native}>${s.name} · ${s.entity_id}${s.native?"":" (external definition unavailable)"}</option>`)}</select></label>
+      <label>Native HA scene <select aria-label="Native HA scene" .value=${this.nativeSelected} ?disabled=${locked} @change=${(e:Event)=>{this.nativeSelected=(e.target as HTMLSelectElement).value;this.nativeInspection=undefined;this.nativeFence=undefined;this.nativeProjection=undefined;}}><option value="">Select a scene</option>${this.nativeScenes.map(s=>html`<option value=${s.id} ?disabled=${!s.native}>${s.name} · ${s.entity_id}${s.native?"":" (external definition unavailable)"}</option>`)}</select></label>
       <button ?disabled=${locked||!this.nativeSelected} @click=${()=>this.nativeRequest("inspect")}>Inspect saved targets</button>
       ${item?html`<article><h3>${item.name}</h3><p>${item.importable?"All targets supported":"Import blocked — unsupported targets"}</p>
         ${item.targets.map(t=>html`<div class="target"><span class="swatch" style=${"background:rgb("+t.rgb.join(",")+")"}></span><span>${this.name(t.device_id)} · ${Math.round(t.brightness/255*100)}%</span></div>`)}
         ${item.problems.map(p=>html`<p>${p.entity_id}: ${p.reason}</p>`)}
         ${stale?html`<p role="alert">Library changed — inspect again before import.</p>`:nothing}
+        ${this.snapshot?.physical_output_enabled?html`<p>Treat inspected RGB values as uncalibrated goals only if appropriate. Do not calibrate an already corrected scene again.</p><button ?disabled=${locked||stale||!item.importable} @click=${()=>this.nativeRequest("project")}>Preview calibrated HA targets</button>
+        ${this.nativeProjection&&this.nativeProjection.revision===lib?.revision&&this.nativeProjection.instance_id===this.snapshot?.instance_id?html`<label>Proposed HA scene entities (JSON, also YAML-compatible)<textarea readonly aria-label="Calibrated HA scene targets" rows="8" style="width:100%;box-sizing:border-box" .value=${JSON.stringify(Object.fromEntries(item.targets.map(t=>[t.entity_id,this.nativeProjection!.targets[t.device_id].ha])),null,2)}></textarea></label><p>Proposal only — verify HA integration color mode and hardware before use.</p>`:nothing}`:nothing}
         <label>Imported scene name <input aria-label="Imported scene name" .value=${this.nativeName} ?disabled=${locked} @input=${(e:Event)=>this.nativeName=(e.target as HTMLInputElement).value}></label>
         <button ?disabled=${locked||stale||!item.importable||!this.nativeName.trim()} @click=${()=>this.nativeRequest("import")}>Import new local scene</button>
       </article>`:nothing}
@@ -360,7 +372,7 @@ class LightCadencePanel extends LitElement {
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
         ${lib?.floorplans?html`<button aria-expanded=${String(this.floorplanOpen)} @click=${()=>this.floorplanOpen=!this.floorplanOpen}>${this.floorplanOpen?"Hide floorplan editor":"Open floorplan editor"}</button>`:nothing}
         ${lib?.floorplans?html`<section ?hidden=${!this.floorplanOpen} aria-labelledby="floorplan"><h2 id="floorplan">Floorplan editor</h2><lightcadence-floorplan .library=${lib} .lights=${this.catalog?.lights??[]} .instanceId=${this.snapshot?.instance_id??""} .disabled=${libraryLocked} .targetColors=${Object.fromEntries(Object.entries(this.snapshot?.targets??{}).map(([id,v])=>[id,color(v.target)]))} @floorplan-command=${(e:CustomEvent<LibraryCommand>)=>this.send(e.detail)}></lightcadence-floorplan></section>`:nothing}
-        ${physical&&lib?.calibrations&&this.snapshot?.calibration_bindings?html`<button aria-expanded=${String(this.calibrationOpen)} @click=${()=>this.calibrationOpen=!this.calibrationOpen}>${this.calibrationOpen?"Hide calibration":"Open calibration assistant"}</button><section ?hidden=${!this.calibrationOpen} aria-labelledby="calibration-title"><h2 id="calibration-title">Calibration assistant</h2><lightcadence-calibration .lights=${this.catalog?.lights??[]} .snapshot=${this.snapshot} .disabled=${formLocked||!this.online||!!this.pendingManual} @calibration-command=${(e:CustomEvent<CalibrationCommand>)=>this.send(e.detail)}></lightcadence-calibration></section>`:nothing}
+        ${physical&&lib?.calibrations&&this.snapshot?.calibration_bindings?html`<button aria-expanded=${String(this.calibrationOpen)} @click=${()=>this.calibrationOpen=!this.calibrationOpen}>${this.calibrationOpen?"Hide calibration":"Open calibration assistant"}</button><section ?hidden=${!this.calibrationOpen} aria-labelledby="calibration-title"><h2 id="calibration-title">Calibration assistant</h2><lightcadence-calibration .lights=${this.catalog?.lights??[]} .snapshot=${this.snapshot} .projection=${this.calibrationProjection} .disabled=${formLocked||!this.online||!!this.pendingManual} @calibration-command=${(e:CustomEvent<CalibrationCommand>)=>this.send(e.detail)}></lightcadence-calibration></section>`:nothing}
         <div class="workspace">
           <section aria-labelledby="setup"><h2 id="setup">${physical?"New zone show":"New zone preview"}</h2>
             <label>Zone name <input aria-label="Zone name" title="Label for this independent preview session" .value=${this.zone} ?disabled=${formLocked} @input=${(e:Event)=>this.zone=(e.target as HTMLInputElement).value}></label>

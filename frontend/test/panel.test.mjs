@@ -540,4 +540,53 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.nativeCalls),[{type:"lightcadence/ha_scene_import",entry_id:"entry",scene_id:"native-a",fingerprint:"fingerprint",name:"Local copy",revision:0,instance_id:"native-import"}]);
     await page.close();
   });
+  await test("calibration assistant compares and saves raw visual anchors on mobile",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    const errors=[];page.on("pageerror",e=>errors.push(e.message));
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const panel=document.querySelector("lightcadence-panel");
+      const binding={model:"synthetic",firmware:"1",transport:"chroma_v2"};
+      const state={schema_version:1,instance_id:"calibration",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a","b"],sessions:[],targets:{},calibration_bindings:{a:binding,b:binding},library:{revision:0,zones:[],scenes:[],calibrations:[],persistent:true,fault:false}};
+      window.calibrationCalls=[];
+      const linear=v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;};
+      panel.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+        if(msg.payload){const p=msg.payload;window.calibrationCalls.push(structuredClone(p));
+          if(p.op==="calibration_start")state.sessions=[{id:"compare",zone_id:"Calibration comparison",phase:"running",revision:1,devices:p.devices,effect:{kind:"static"},comparison:{reference:p.reference,targets:{}}}];
+          if(p.op==="calibration_adjust")state.sessions[0].revision++;
+          if(p.op==="calibration_start"||p.op==="calibration_adjust")state.sessions[0].comparison.targets=Object.fromEntries(Object.entries(p.targets).map(([id,t])=>[id,{red:linear(t.rgb[0]),green:linear(t.rgb[1]),blue:linear(t.rgb[2]),brightness:t.brightness}]));
+          if(p.op==="library_save"){state.library.revision++;state.library.calibrations=[{id:"profile",revision:1,...p.value}];}
+          if(p.op==="calibration_project")return {...structuredClone(state),calibration_projection:{instance_id:"calibration",revision:state.library.revision,targets:{a:{ha:{state:"on",rgb_color:[255,255,255],brightness:128},native:{}},b:{ha:{state:"on",rgb_color:[240,245,255],brightness:128},native:{}}}}};
+          if(p.op==="stop"){state.sessions=[];}
+        }return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Open calibration assistant"}).click();
+    await page.getByLabel("Calibration reference",{exact:true}).selectOption("a");
+    await page.getByLabel("Calibration lamp",{exact:true}).selectOption("b");
+    await page.getByRole("button",{name:"Start comparison",exact:true}).click();
+    await page.getByRole("button",{name:"Apply comparison targets",exact:true}).waitFor();
+    await page.getByLabel("Calibration command colour",{exact:true}).fill("#f0f5ff");
+    await page.getByRole("button",{name:"Apply comparison targets",exact:true}).click();
+    await page.getByText("Engine targets accepted — visually check both lamps before recording.",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Record colour point",exact:true}).click();
+    await page.getByRole("button",{name:"Record brightness point",exact:true}).click();
+    await page.getByLabel("Profile name",{exact:true}).fill("Visual correction");
+    await page.getByRole("button",{name:"Save calibration profile",exact:true}).click();
+    await page.getByText("Library updated — no lamp commands sent",{exact:true}).waitFor();
+    const calls=await page.evaluate(()=>window.calibrationCalls);
+    assert.deepEqual(calls.map(p=>p.op),["calibration_start","calibration_adjust","library_save"]);
+    assert.equal(calls[1].revision,1);
+    assert.deepEqual(calls[2].value.points,[{goal:[255,255,255],command:[240,245,255]}]);
+    await page.getByRole("button",{name:"Calculate common-goal HA targets"}).click();
+    await page.getByLabel("Common-goal HA targets",{exact:true}).waitFor();
+    assert.ok((await page.getByLabel("Common-goal HA targets",{exact:true}).inputValue()).includes("light.b"));
+    await page.getByRole("button",{name:"Stop show",exact:true}).click();
+    await page.getByText("No active shows.",{exact:false}).waitFor();
+    assert.deepEqual(errors,[]);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

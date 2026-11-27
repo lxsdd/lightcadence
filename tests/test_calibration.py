@@ -50,6 +50,14 @@ class CalibrationTests(unittest.IsolatedAsyncioTestCase):
         try:
             cmd=dict(op="library_save",kind="calibrations",id=None,revision=0,value=VALUE)
             await runtime.command(cmd)
+            proposal=dict(op="calibration_project",revision=1,devices=["a","b"],
+                targets={d:{"rgb":[255,100,0],"brightness":.5} for d in ("a","b")})
+            result=await runtime.command(proposal)
+            self.assertEqual(result["calibration_projection"]["targets"]["a"]["ha"],
+                {"state":"on","rgb_color":[220,120,10],"brightness":102})
+            self.assertEqual(auth.states,{})
+            self.assertEqual(runtime.manager.snapshots(),())
+            with self.assertRaises(StaleRevision): await runtime.command({**proposal,"revision":0})
             start=dict(op="calibration_start",request_id="compare",devices=["a","b"],reference="a",
                 targets={"a":{"rgb":[255,100,0],"brightness":.5},"b":{"rgb":[220,120,10],"brightness":.4}})
             state=await runtime.command(start);s=state["sessions"][0]

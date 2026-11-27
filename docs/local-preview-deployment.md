@@ -75,3 +75,20 @@ before any downgrade; this tool never rewrites or resets those data files.
 HA version compatibility, real OMV install, image rollback, data migration
 and crash durability must still be accepted. Never use a code rollback as a
 substitute for a pending physical-device recovery.
+
+## Explicit local hardware-test preparation (no activation)
+
+Prepare with the same full source SHA and `--hardware-candidate` in a separate
+staging directory. The sealed mode is `hardware_candidate` and the manifest
+requires the exact hardware overlay. The regular preview remains unchanged.
+Verification, offline activation and previous-code backup rules remain the
+same. No profile, journal, token, library, or actual local configuration is
+copied into the bundle. Only with separate owner approval, provide the
+existing owner-local token, verified enrolled device JSON and distinct
+persistent recovery and library directories readable/writable as appropriate
+by UID 10001, then use the three explicit Compose files (base, hardware-test,
+library). HA configuration must select physical candidate mode and the same
+loopback port/token. The preparation and CI do not start this stack or send
+hardware commands. Stop/restore and inspect recovery before shutdown or
+rollback. See hardware-test-boundary.md for enrollment requirements. The
+calibration assistant is limited initially to RGB-capable enrolled lamps.

@@ -232,6 +232,40 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
             assert hass.states.get(switch_id).state == "unavailable"
             await hass.services.async_call("lightcadence", "stop_scene", {"scene_id": saved_id}, blocking=True)
             assert len(authority.writes) == before + 1
+            # Actual HA admin WebSocket, synthetic peers only: comparison uses
+            # the original lease/stop path and projection does not write.
+            comparison = {"op":"calibration_start","request_id":"visual-comparison",
+                "instance_id":runtime.instance_id,"devices":[a.id,b.id],"reference":a.id,
+                "targets":{a.id:{"rgb":[255,255,255],"brightness":.5},
+                           b.id:{"rgb":[240,245,255],"brightness":.4}}}
+            async with await auth(session, ordinary) as nonadmin:
+                denied = await command(nonadmin, 1, "lightcadence/physical",
+                    entry_id=entry_id,payload=comparison)
+                assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
+            originals = dict(authority.states)
+            begun = await command(ws, 17, "lightcadence/physical",entry_id=entry_id,payload=comparison)
+            assert begun["success"], begun
+            compare = next(s for s in begun["result"]["sessions"] if s.get("comparison") and s["phase"]=="running")
+            assert compare["comparison"]["reference"] == a.id
+            assert runtime.manager.owner(a.id) == compare["id"]
+            adjusted = await command(ws, 18, "lightcadence/physical",entry_id=entry_id,
+                payload={"op":"calibration_adjust","instance_id":runtime.instance_id,"session_id":compare["id"],
+                         "revision":compare["revision"],"targets":comparison["targets"]})
+            assert adjusted["success"], adjusted
+            before_projection = len(authority.writes)
+            proposal = await command(ws, 19, "lightcadence/physical",entry_id=entry_id,
+                payload={"op":"calibration_project","instance_id":runtime.instance_id,
+                         "revision":runtime.library.data["revision"],"devices":[a.id,b.id],
+                         "targets":comparison["targets"]})
+            assert proposal["success"], proposal
+            assert proposal["result"]["calibration_projection"]["targets"][a.id]["ha"]["rgb_color"] == [255,255,255]
+            assert len(authority.writes) == before_projection
+            stopped = await command(ws, 20, "lightcadence/physical",entry_id=entry_id,
+                payload={"op":"stop","instance_id":runtime.instance_id,"session_id":compare["id"],
+                         "revision":runtime.manager.snapshot(compare["id"]).revision})
+            assert stopped["success"], stopped
+            assert runtime.manager.owner(a.id) is None and runtime.manager.owner(b.id) is None
+            assert authority.states == originals
         assert await hass.config_entries.async_unload(entry_id)
         try:
             await hass.services.async_call("lightcadence", "turn_off", {"entity_id": a.entity_id}, blocking=True)

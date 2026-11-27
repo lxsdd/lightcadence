@@ -9,7 +9,8 @@ on:
       - 'tests/**'
       - 'Dockerfile'
       - '.dockerignore'
-      - 'compose.yaml'
+      - 'compose*.yaml'
+      - 'deployment/**'
       - '.github/workflows/engine-ci.yml'
   pull_request:
     branches: [main]
@@ -20,7 +21,8 @@ on:
       - 'tests/**'
       - 'Dockerfile'
       - '.dockerignore'
-      - 'compose.yaml'
+      - 'compose*.yaml'
+      - 'deployment/**'
       - '.github/workflows/engine-ci.yml'
 permissions:
   contents: read
@@ -37,6 +39,11 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact source checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - name: Build and typecheck original Lit panel
         run: |
           cd frontend
@@ -47,8 +54,16 @@ jobs:
           cd frontend
           npx --no-install playwright install chromium
           npm test
+      - name: Prepare and verify exact-source preview build (local only)
+        run: |
+          python3 -m unittest discover -s deployment -p 'test_*.py' -v
+          stage="$RUNNER_TEMP/lightcadence-preview"
+          python3 deployment/prepare_preview.py prepare --repo . --sha "$(git rev-parse HEAD)" --destination "$stage"
+          python3 deployment/prepare_preview.py verify "$stage"
+          cmp custom_components/lightcadence/frontend/panel.js "$stage/custom_components/lightcadence/frontend/panel.js"
+          LIGHTCADENCE_TOKEN_PATH="$RUNNER_TEMP/synthetic-token" docker compose -f "$stage/compose.yaml" config --quiet
       - name: Build local engine container (no publish)
-        run: docker build -t lightcadence-ci .
+        run: docker build -t lightcadence-ci "$RUNNER_TEMP/lightcadence-preview"
       - name: Compile original engine and HA integration
         run: python3 -m compileall -q engine custom_components tests
       - name: Original engine and loopback HTTP positive and negative regressions

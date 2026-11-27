@@ -10,6 +10,7 @@ from .client import EngineClient, EngineError
 from .const import DOMAIN, CONF_PORT, CONF_TOKEN, CONF_PHYSICAL
 from .panel import register_panel
 from .actions import register_actions
+from .ha_scenes import scene_catalog, inspect_scene, import_payload
 
 
 async def async_setup(hass, config):
@@ -19,6 +20,9 @@ async def async_setup(hass, config):
     websocket_api.async_register_command(hass, ws_preview)
     websocket_api.async_register_command(hass, ws_catalog)
     websocket_api.async_register_command(hass, ws_physical)
+    websocket_api.async_register_command(hass, ws_ha_scenes)
+    websocket_api.async_register_command(hass, ws_ha_scene_inspect)
+    websocket_api.async_register_command(hass, ws_ha_scene_import)
     register_actions(hass)
     return True
 
@@ -51,6 +55,9 @@ async def _bridge(hass, connection, msg, mutate=False, physical=False):
     try:
         if mutate:
             payload = msg["payload"]
+            # Only the dedicated native-scene endpoint may derive this operation.
+            if payload.get("op") == "library_import":
+                raise ValueError("use native scene import")
             if client.physical is not physical:
                 raise EngineError("incompatible_engine")
             validate_preview_selection(hass, payload)
@@ -92,6 +99,57 @@ async def ws_preview(hass, connection, msg):
 @websocket_api.async_response
 async def ws_physical(hass, connection, msg):
     await _bridge(hass, connection, msg, mutate=True, physical=True)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({"type": "lightcadence/ha_scenes"})
+@websocket_api.async_response
+async def ws_ha_scenes(hass, connection, msg):
+    connection.send_result(msg["id"], scene_catalog(hass))
+
+
+async def _ha_scene(hass, connection, msg, save=False):
+    client = hass.data.get(DOMAIN, {}).get(msg["entry_id"])
+    if client is None:
+        connection.send_error(msg["id"], "not_found", "LightCadence entry is not loaded")
+        return
+    try:
+        state = await client.state()
+        enrolled = set(state["enrolled_devices"]) if client.physical else None
+        inspected = inspect_scene(hass, msg["scene_id"], enrolled)
+        if save:
+            if inspected["fingerprint"] != msg["fingerprint"]:
+                raise EngineError("stale_revision")
+            if state["instance_id"] != msg["instance_id"]:
+                raise EngineError("stale_instance")
+            payload = import_payload(inspected, msg["revision"], msg["instance_id"], msg["name"])
+            result = await (client.physical_command(payload) if client.physical else client.preview(payload))
+        else:
+            result = inspected
+    except ValueError:
+        connection.send_error(msg["id"], "invalid_selection", "Native scene unavailable or unsupported")
+    except EngineError as exc:
+        connection.send_error(msg["id"], exc.code, "LightCadence scene import failed")
+    else:
+        connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({"type": "lightcadence/ha_scene_inspect", vol.Required("entry_id"): str,
+                                  vol.Required("scene_id"): str})
+@websocket_api.async_response
+async def ws_ha_scene_inspect(hass, connection, msg):
+    await _ha_scene(hass, connection, msg)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({"type": "lightcadence/ha_scene_import", vol.Required("entry_id"): str,
+                                  vol.Required("scene_id"): str, vol.Required("fingerprint"): str,
+                                  vol.Required("instance_id"): str, vol.Required("revision"): int,
+                                  vol.Required("name"): str})
+@websocket_api.async_response
+async def ws_ha_scene_import(hass, connection, msg):
+    await _ha_scene(hass, connection, msg, save=True)
 
 
 @websocket_api.require_admin

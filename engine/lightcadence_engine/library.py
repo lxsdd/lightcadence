@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from dataclasses import asdict
 import fcntl
 import json
+import re
 import os
 from pathlib import Path
 import tempfile
@@ -75,7 +76,7 @@ class ProjectLibrary:
                 raise ValueError("invalid library collection")
             for obj in doc[kind]:
                 keys = ("schema_version", "id", "revision", "updated_at", "name")
-                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") if kind == "scenes" else ("width", "height", "features")))
+                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") + (("ha_source",) if isinstance(obj, dict) and "ha_source" in obj else ()) if kind == "scenes" else ("width", "height", "features")))
                 if (type(obj["schema_version"]) is not int or obj["schema_version"] != 1 or
                         type(obj["revision"]) is not int or obj["revision"] < 1 or
                         not isinstance(obj["id"], str) or str(UUID(obj["id"])) != obj["id"] or obj["id"] in ids):
@@ -93,6 +94,11 @@ class ProjectLibrary:
                         raise ValueError("unknown zone reference")
                     decode_effect(obj["effect"], template=True).validate_targets(zone_members[obj["zone_id"]])
                     StopPolicy(obj["stop_policy"])
+                    if "ha_source" in obj:
+                        source = obj["ha_source"]
+                        exact(source, ("registry_id", "fingerprint"))
+                        if not isinstance(source["registry_id"], str) or not source["registry_id"].strip() or not isinstance(source["fingerprint"], str) or not re.fullmatch("[0-9a-f]{64}", source["fingerprint"]):
+                            raise ValueError("invalid HA import provenance")
                 else:
                     geometry(obj, zones)
 
@@ -101,6 +107,8 @@ class ProjectLibrary:
                 "spatial_paths": spatial_paths(self.data["floorplans"], self.data["zones"])}
 
     def command(self, body):
+        if isinstance(body, dict) and body.get("op") == "library_import":
+            return self.import_scene(body)
         exact(body, ("op", "revision", "kind", "id", "value"))
         if self.fault or (self.directory is not None and self.lock is None):
             raise OSError("library unavailable")
@@ -132,6 +140,8 @@ class ProjectLibrary:
                 exact(value, ("name", "width", "height", "features"))
                 item = deepcopy(value)
                 item["name"] = name(item["name"])
+            if kind == "scenes" and old is not None and "ha_source" in old:
+                item["ha_source"] = deepcopy(old["ha_source"])
             item.update(schema_version=1, id=key or str(uuid4()), revision=1 if old is None else old["revision"] + 1,
                         updated_at=datetime.now(timezone.utc).isoformat())
             if old is None:
@@ -140,6 +150,29 @@ class ProjectLibrary:
                 rows[rows.index(old)] = item
         else:
             raise ValueError("unknown library operation")
+        doc["revision"] += 1
+        self.validate(doc)
+        if self.directory is not None:
+            self._save(doc)
+        self.data = doc
+
+    def import_scene(self, body):
+        """Atomic new zone + scene, never edit originals or an existing preset."""
+        exact(body, ("op", "revision", "name", "devices", "effect", "ha_source"))
+        if self.fault or (self.directory is not None and self.lock is None):
+            raise OSError("library unavailable")
+        if type(body["revision"]) is not int or body["revision"] != self.data["revision"]:
+            raise StaleRevision("refresh library")
+        doc = deepcopy(self.data)
+        title = name(body["name"])
+        stamp = datetime.now(timezone.utc).isoformat()
+        zone = {"schema_version": 1, "id": str(uuid4()), "revision": 1, "updated_at": stamp,
+                "name": title, "devices": members(body["devices"])}
+        scene = {"schema_version": 1, "id": str(uuid4()), "revision": 1, "updated_at": stamp,
+                 "name": title, "zone_id": zone["id"], "effect": effect(body["effect"]),
+                 "stop_policy": StopPolicy.RESTORE.value, "ha_source": deepcopy(body["ha_source"])}
+        doc["zones"].append(zone)
+        doc["scenes"].append(scene)
         doc["revision"] += 1
         self.validate(doc)
         if self.directory is not None:

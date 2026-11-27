@@ -18,7 +18,9 @@ type LeafEffect={kind:string;period_seconds:number;brightness:number;color:numbe
 type Layer={effect:LeafEffect;opacity:number;blend:"over"|"add"|"max";devices?:string[]};
 type PresetEffect=LeafEffect & Timing & {layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean};
 type Zone={id:string;name:string;revision:number;devices:string[]};
-type Scene={id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
+type NativeScene={id:string;entity_id:string;name:string;native:boolean};
+type NativeInspection={scene_id:string;entity_id:string;name:string;fingerprint:string;importable:boolean;targets:{device_id:string;entity_id:string;rgb:number[];brightness:number}[];problems:{entity_id:string;reason:string}[]};
+type Scene={ha_source?:{registry_id:string;fingerprint:string};id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
 type Library={floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
 type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes"|"floorplans";id:string|null;value:Record<string,unknown>|null};
 type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
@@ -58,8 +60,13 @@ class LightCadencePanel extends LitElement {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
     zone:{state:true}, effect:{state:true},layers:{state:true}, tracks:{state:true},timing:{state:true},timelineLoop:{state:true},timelineAutoEnd:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
     busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
-    manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
+    nativeScenes:{state:true},nativeSelected:{state:true},nativeInspection:{state:true},nativeName:{state:true},manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
   };
+  declare nativeScenes:NativeScene[];
+  declare nativeSelected:string;
+  declare nativeInspection?:NativeInspection;
+  declare nativeName:string;
+  private nativeFence?:{revision:number;instance:string};
   declare hass?: HA;
   declare catalog?: Catalog;
   declare snapshot?: Snapshot;
@@ -96,7 +103,7 @@ class LightCadencePanel extends LitElement {
   private entry?: string;
   private refreshing = false;
   constructor() {
-    super(); this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timing={};this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
+    super(); this.nativeScenes=[];this.nativeSelected="";this.nativeName="";this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timing={};this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
     this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
@@ -114,7 +121,7 @@ class LightCadencePanel extends LitElement {
   private accept(s: Snapshot) {
     const physical=this.catalog?.physical_output_enabled===true;
     if(s.schema_version!==1 || s.output_mode!==(physical?"physical_candidate":"preview") || s.physical_output_enabled!==physical || (physical && (s.hardware_qualified!==false || !Array.isArray(s.enrolled_devices)))) throw new Error("incompatible engine API");
-    if(this.snapshot && this.snapshot.instance_id!==s.instance_id) {this.pendingStart=undefined;this.pendingManual=undefined;}
+    if(this.snapshot && this.snapshot.instance_id!==s.instance_id) {this.pendingStart=undefined;this.pendingManual=undefined;this.nativeInspection=undefined;this.nativeFence=undefined;}
     this.snapshot=s;
     if(s.library){if(!s.library.zones.some(z=>z.id===this.selectedZone))this.selectedZone="";if(!s.library.scenes.some(x=>x.id===this.selectedScene))this.selectedScene="";}
   }
@@ -213,6 +220,53 @@ class LightCadencePanel extends LitElement {
     if(this.catalog?.physical_output_enabled) {payload.instance_id=this.snapshot?.instance_id;payload.stop_policy=this.stopPolicy;}
     this.pendingStart=payload;
     void this.send(payload);
+  }
+  private async nativeRequest(action:"list"|"inspect"|"import") {
+    if(!this.hass||!this.entry||!this.online||this.busy||this.pendingStart||this.pendingManual)return;
+    const lib=this.snapshot?.library, state=this.snapshot;
+    if(!lib||!state)return;
+    const inspection=this.nativeInspection, fence=this.nativeFence;
+    if(action==="import"&&(!inspection?.importable||!fence||fence.revision!==lib.revision||fence.instance!==state.instance_id||!this.nativeName.trim()||lib.fault))return;
+    const epoch=++this.epoch;this.refreshing=false;this.busy=true;
+    try{
+      if(action==="list"){
+        this.nativeInspection=undefined;this.nativeFence=undefined;this.nativeSelected="";
+        const rows=await this.hass.callWS<NativeScene[]>({type:"lightcadence/ha_scenes"});
+        if(epoch!==this.epoch)return;
+        this.nativeScenes=rows;this.status="HA scene list loaded — no activation";
+      }else if(action==="inspect"){
+        this.nativeInspection=undefined;this.nativeFence=undefined;
+        const item=await this.hass.callWS<NativeInspection>({type:"lightcadence/ha_scene_inspect",entry_id:this.entry,scene_id:this.nativeSelected});
+        if(epoch!==this.epoch)return;
+        this.nativeInspection=item;this.nativeName=item.name;this.nativeFence={revision:lib.revision,instance:state.instance_id};
+        this.status=item.importable?"Review saved scene targets before import":"Scene cannot be imported without changing its meaning";
+      }else if(inspection&&fence){
+        // No retry after uncertain result. Reinspect and review the library.
+        this.nativeInspection=undefined;this.nativeFence=undefined;
+        const updated=await this.hass.callWS<Snapshot>({type:"lightcadence/ha_scene_import",entry_id:this.entry,scene_id:inspection.scene_id,fingerprint:inspection.fingerprint,name:this.nativeName,revision:fence.revision,instance_id:fence.instance});
+        if(epoch!==this.epoch)return;
+        this.accept(updated);
+        this.status="New local zone and scene imported — no HA scene or lamp changed";
+      }
+    }catch(error){if(epoch===this.epoch)this.status=explain(error);}
+    finally{if(epoch===this.epoch){this.busy=false;void this.refresh();}}
+  }
+  private renderNativeImport(locked:boolean) {
+    const item=this.nativeInspection,lib=this.snapshot?.library;
+    const stale=!!item&&(this.nativeFence?.revision!==lib?.revision||this.nativeFence?.instance!==this.snapshot?.instance_id);
+    return html`<details><summary>Import native HA scene</summary>
+      <p>Read the saved targets, not current light states. Only complete supported RGB-on scenes can be copied; no activation or changes to HA scenes.</p>
+      <button ?disabled=${locked} @click=${()=>this.nativeRequest("list")}>Load HA scenes</button>
+      <label>Native HA scene <select aria-label="Native HA scene" .value=${this.nativeSelected} ?disabled=${locked} @change=${(e:Event)=>{this.nativeSelected=(e.target as HTMLSelectElement).value;this.nativeInspection=undefined;this.nativeFence=undefined;}}><option value="">Select a scene</option>${this.nativeScenes.map(s=>html`<option value=${s.id} ?disabled=${!s.native}>${s.name} · ${s.entity_id}${s.native?"":" (external definition unavailable)"}</option>`)}</select></label>
+      <button ?disabled=${locked||!this.nativeSelected} @click=${()=>this.nativeRequest("inspect")}>Inspect saved targets</button>
+      ${item?html`<article><h3>${item.name}</h3><p>${item.importable?"All targets supported":"Import blocked — unsupported targets"}</p>
+        ${item.targets.map(t=>html`<div class="target"><span class="swatch" style=${"background:rgb("+t.rgb.join(",")+")"}></span><span>${this.name(t.device_id)} · ${Math.round(t.brightness/255*100)}%</span></div>`)}
+        ${item.problems.map(p=>html`<p>${p.entity_id}: ${p.reason}</p>`)}
+        ${stale?html`<p role="alert">Library changed — inspect again before import.</p>`:nothing}
+        <label>Imported scene name <input aria-label="Imported scene name" .value=${this.nativeName} ?disabled=${locked} @input=${(e:Event)=>this.nativeName=(e.target as HTMLInputElement).value}></label>
+        <button ?disabled=${locked||stale||!item.importable||!this.nativeName.trim()} @click=${()=>this.nativeRequest("import")}>Import new local scene</button>
+      </article>`:nothing}
+    </details>`;
   }
   private loadZone(id:string) {
     const z=this.snapshot?.library?.zones.find(x=>x.id===id);
@@ -337,6 +391,8 @@ class LightCadencePanel extends LitElement {
             <button ?disabled=${libraryLocked||!validScene} @click=${()=>this.libraryWrite("scenes",false,true)}>Save new scene</button>
             <button ?disabled=${libraryLocked||!validScene||!this.selectedScene} @click=${()=>this.libraryWrite("scenes")}>Update scene</button>
             <button ?disabled=${libraryLocked||!this.selectedScene} @click=${()=>this.libraryWrite("scenes",true)}>Delete scene</button>
+            ${lib.scenes.find(s=>s.id===this.selectedScene)?.ha_source?html`<p>Imported from a native HA scene — independent copy, not synchronized.</p>`:nothing}
+            ${this.renderNativeImport(libraryLocked)}
             ${this.selectedScene?html`<p>HA automation scene UUID: <code style="overflow-wrap:anywhere">${this.selectedScene}</code></p><p>Use LightCadence start_scene and stop_scene actions for saved-scene automation. Panel quick starts use the current editor settings.</p>`:nothing}
           </section>`:nothing}
           <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>

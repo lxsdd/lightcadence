@@ -482,4 +482,34 @@ try {
     assert.equal(await page.evaluate(()=>window.tempoCalls[1].position),2);
     await page.close();
   });
+  await test("native HA scene inspection and explicit import in original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.nativeCalls=[];
+      const s={schema_version:1,instance_id:"native-import",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:0,zones:[],scenes:[],persistent:true,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.type==="lightcadence/ha_scenes")return [{id:"native-a",name:"Native RGB",entity_id:"scene.rgb",native:true},{id:"external",name:"External",entity_id:"scene.external",native:false}];
+        if(msg.type==="lightcadence/ha_scene_inspect")return {scene_id:"native-a",entity_id:"scene.rgb",name:"Native RGB",fingerprint:"fingerprint",importable:true,targets:[{device_id:"a",entity_id:"light.a",rgb:[32,64,128],brightness:100}],problems:[]};
+        if(msg.type==="lightcadence/ha_scene_import"){window.nativeCalls.push(structuredClone(msg));s.library.revision++;return structuredClone(s);}
+        if(msg.payload)window.nativeCalls.push(structuredClone(msg));
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByText("Import native HA scene",{exact:true}).click();
+    await page.getByRole("button",{name:"Load HA scenes",exact:true}).click();
+    await page.getByLabel("Native HA scene",{exact:true}).selectOption("native-a");
+    await page.getByRole("button",{name:"Inspect saved targets",exact:true}).click();
+    await page.getByText("All targets supported",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.nativeCalls.length),0);
+    await page.getByLabel("Imported scene name",{exact:true}).fill("Local copy");
+    await page.getByRole("button",{name:"Import new local scene",exact:true}).click();
+    await page.getByText("New local zone and scene imported — no HA scene or lamp changed",{exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.nativeCalls),[{type:"lightcadence/ha_scene_import",entry_id:"entry",scene_id:"native-a",fingerprint:"fingerprint",name:"Local copy",revision:0,instance_id:"native-import"}]);
+    await page.close();
+  });
 } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}

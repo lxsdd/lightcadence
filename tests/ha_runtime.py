@@ -241,6 +241,10 @@ async def main():
                                       "elevation": 0, "unit_system": "metric", "time_zone": "UTC"},
                     "http": {"server_host": "127.0.0.1", "server_port": HA_PORT},
                     "websocket_api": {}, "config": {}, "frontend": {},
+                    "scene": [{"id": "synthetic_rgb_import", "name": "Synthetic RGB import",
+                               "entities": {"light.synthetic_b": {"state": "on", "color_mode": "rgb", "rgb_color": [64, 128, 255], "brightness": 120}}},
+                              {"id": "synthetic_off_import", "name": "Synthetic off import",
+                               "entities": {"light.synthetic_b": {"state": "off"}}}],
                 }, hass)
                 assert result is hass, "HA bootstrap failed"
                 await hass.async_start()
@@ -359,6 +363,34 @@ async def main():
                         assert saved["result"]["sessions"] == [snapshot]
                         stale = await command(ws, 17, "lightcadence/preview", entry_id=entry_id, payload=floor)
                         assert not stale["success"] and stale["error"]["code"] == "stale_revision", stale
+                        scenes = await command(ws, 18, "lightcadence/ha_scenes")
+                        assert scenes["success"], scenes
+                        native = {row["entity_id"]: row for row in scenes["result"]}
+                        rgb_id = native["scene.synthetic_rgb_import"]["id"]
+                        off_id = native["scene.synthetic_off_import"]["id"]
+                        before_b = hass.states.get(b.entity_id)
+                        inspection = await command(ws, 19, "lightcadence/ha_scene_inspect", entry_id=entry_id, scene_id=rgb_id)
+                        assert inspection["success"], inspection
+                        target = inspection["result"]
+                        assert target["importable"] and target["targets"] == [{"device_id": b.id, "entity_id": b.entity_id, "rgb": [64,128,255], "brightness": 120}], target
+                        unsupported = await command(ws, 20, "lightcadence/ha_scene_inspect", entry_id=entry_id, scene_id=off_id)
+                        assert unsupported["success"] and not unsupported["result"]["importable"], unsupported
+                        args = {"entry_id": entry_id, "scene_id": rgb_id, "fingerprint": target["fingerprint"],
+                                "instance_id": instance, "revision": 2, "name": "Imported synthetic RGB"}
+                        changed = await command(ws, 21, "lightcadence/ha_scene_import", **{**args, "fingerprint": "0"*64})
+                        assert not changed["success"] and changed["error"]["code"] == "stale_revision", changed
+                        denied_off = await command(ws, 22, "lightcadence/ha_scene_import", **{**args, "scene_id": off_id, "fingerprint": unsupported["result"]["fingerprint"]})
+                        assert not denied_off["success"], denied_off
+                        imported = await command(ws, 23, "lightcadence/ha_scene_import", **args)
+                        assert imported["success"], imported
+                        lib = imported["result"]["library"]
+                        assert lib["revision"] == 3 and len(lib["zones"]) == 2 and len(lib["scenes"]) == 1
+                        assert lib["scenes"][0]["ha_source"]["registry_id"] == rgb_id
+                        assert lib["zones"][-1]["devices"] == [b.id]
+                        assert imported["result"]["sessions"] == [snapshot]
+                        assert hass.states.get(b.entity_id) == before_b
+                        repeated = await command(ws, 24, "lightcadence/ha_scene_import", **args)
+                        assert not repeated["success"] and repeated["error"]["code"] == "stale_revision"
                     async with await auth(session, ordinary) as ws:
                         panels = await command(ws, 1, "get_panels")
                         assert "lightcadence" not in panels["result"]
@@ -368,6 +400,9 @@ async def main():
                             (4, "lightcadence/preview", {"entry_id": entry_id, "payload": payload}),
                             (5, "lightcadence/physical", {"entry_id": entry_id, "payload": payload}),
                             (6, "lightcadence/preview", {"entry_id": entry_id, "payload": floor}),
+                            (7, "lightcadence/ha_scenes", {}),
+                            (8, "lightcadence/ha_scene_inspect", {"entry_id": entry_id, "scene_id": rgb_id}),
+                            (9, "lightcadence/ha_scene_import", args),
                         ]:
                             denied = await command(ws, i, kind, **args)
                             assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied

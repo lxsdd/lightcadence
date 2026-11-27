@@ -137,7 +137,7 @@ class PreviewRuntime:
                                           body["action"], body.get("position"))
             self.tick()
             return self.state()
-        if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):
+        if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete", "library_import"):
             self.library.command(body)
             return self.state()
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",
@@ -286,7 +286,7 @@ class PhysicalRuntime(PreviewRuntime):
                                           body["action"], body.get("position"))
             self.tick()
             return self.state()
-        if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete"):
+        if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete", "library_import"):
             self.library.command(body)
             return self.state()
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",

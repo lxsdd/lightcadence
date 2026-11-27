@@ -76,7 +76,7 @@ def validate_preview_selection(hass, payload):
         devices = [f.get("device_id") for f in features if f.get("kind") in ("lamp", "strip")]
         if not devices:
             return
-    elif payload.get("op") == "start":
+    elif payload.get("op") in ("start", "scene_start"):
         devices = payload.get("devices")
     else:
         return

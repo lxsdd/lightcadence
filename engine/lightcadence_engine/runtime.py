@@ -9,6 +9,7 @@ from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
 from .audio import AudioHub
 from .library import ProjectLibrary
+from .scene_launch import SceneLaunches
 
 
 def fields(value, required, optional=()):
@@ -58,6 +59,7 @@ class PreviewRuntime:
         self.instance_id = str(uuid4())
         self.manager = SessionManager(clock)
         self.library = ProjectLibrary()
+        self.scene_launches = SceneLaunches()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
         self.targets = {}
@@ -93,6 +95,9 @@ class PreviewRuntime:
 
     def session_state(self, session):
         result = asdict(session)
+        origin = self.scene_launches.origins.get(session.id)
+        if origin is not None:
+            result["scene_origin"] = dict(origin)
         if session.phase is Phase.RUNNING:
             result["mix"] = self.manager.mix_state(session.id)
         timeline = self.manager.timeline_state(session.id)
@@ -104,6 +109,18 @@ class PreviewRuntime:
         return result
 
     def command(self, body):
+        if isinstance(body, dict) and body.get("op") == "scene_start":
+            replay, launch = self.scene_launches.prepare(body, self.library)
+            if replay is None:
+                request, zone, devices, effect, _policy, positions, origin = launch
+                self.validate_audio(effect)
+                self.scene_launches.begin(body)
+                session = self.manager.start(request, zone,
+                    {d: DeviceState(False, LightTarget(0, 0, 0, 0)) for d in devices},
+                    effect, StopPolicy.HOLD, positions)
+                self.scene_launches.finish(body, session, origin)
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") == "mix_control":
             fields(body, ("op", "session_id", "revision", "action", "value"), ("index",))
             if (body["action"] != "master") != ("index" in body):
@@ -186,6 +203,7 @@ class PhysicalRuntime(PreviewRuntime):
         self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock, journal=journal)
         self.manager = self.physical.manager
         self.library = ProjectLibrary()
+        self.scene_launches = SceneLaunches()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
         self.targets = {}
@@ -242,6 +260,16 @@ class PhysicalRuntime(PreviewRuntime):
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
+        if isinstance(body, dict) and body.get("op") == "scene_start":
+            replay, launch = self.scene_launches.prepare(body, self.library)
+            if replay is None:
+                request, zone, devices, effect, policy, positions, origin = launch
+                self.validate_audio(effect)
+                self.scene_launches.begin(body)
+                session = await self.physical.start(request, zone, devices, effect, policy, positions)
+                self.scene_launches.finish(body, session, origin)
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") == "mix_control":
             fields(body, ("op", "session_id", "revision", "action", "value"), ("index",))
             if (body["action"] != "master") != ("index" in body):

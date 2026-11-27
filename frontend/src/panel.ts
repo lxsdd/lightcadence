@@ -10,7 +10,7 @@ type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type MixState={master:number;groups:{gain:number;muted:boolean;solo:boolean}[]};
-type Session = {mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
+type Session = {scene_origin?:{scene_id:string;scene_revision:number;scene_name:string};mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number;kind?:string;clock_mapping?:string;read_to_engine_seconds?:number|null;transport_jitter_seconds?:number|null};
@@ -337,6 +337,7 @@ class LightCadencePanel extends LitElement {
             <button ?disabled=${libraryLocked||!validScene} @click=${()=>this.libraryWrite("scenes",false,true)}>Save new scene</button>
             <button ?disabled=${libraryLocked||!validScene||!this.selectedScene} @click=${()=>this.libraryWrite("scenes")}>Update scene</button>
             <button ?disabled=${libraryLocked||!this.selectedScene} @click=${()=>this.libraryWrite("scenes",true)}>Delete scene</button>
+            ${this.selectedScene?html`<p>HA automation scene UUID: <code style="overflow-wrap:anywhere">${this.selectedScene}</code></p><p>Use LightCadence start_scene and stop_scene actions for saved-scene automation. Panel quick starts use the current editor settings.</p>`:nothing}
           </section>`:nothing}
           <section aria-labelledby="running"><h2 id="running">${physical?"Running shows":"Running previews"} · ${active.length}</h2>
           ${active.length?active.map(s=>html`<article data-phase=${s.phase}><h3>${s.zone_id}</h3><p>${descriptions[s.effect.kind]??s.effect.kind} · ${s.phase} · ${s.devices.length} lamps</p>${s.effect.audio_source?html`<p>Audio: ${sources.find(a=>a.id===s.effect.audio_source)?.name??"Source disconnected"} · ${sources.find(a=>a.id===s.effect.audio_source)?.status??"ambient"}</p>`:nothing}

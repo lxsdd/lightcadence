@@ -170,6 +170,44 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
             assert authority.states[b.id] == _decode("on", 45, 0x102040)
             assert [d for d, _ in authority.writes].count(a.id) == 3
             assert [d for d, _ in authority.writes].count(b.id) == 1
+            # Saved scene actions run through the real HA service registry
+            # and the original physical admission/stop transaction.
+            zone = runtime.library
+            zone.command({"op": "library_save", "revision": 0, "kind": "zones", "id": None,
+                          "value": {"name": "Synthetic automation", "devices": [a.id]}})
+            zid = zone.snapshot()["zones"][0]["id"]
+            zone.command({"op": "library_save", "revision": 1, "kind": "scenes", "id": None,
+                          "value": {"name": "Synthetic saved", "zone_id": zid,
+                                    "effect": {"kind": "static", "period_seconds": 4, "brightness": .5,
+                                               "color": [1,0,0], "width": .25}, "stop_policy": "restore"}})
+            saved_id = zone.snapshot()["scenes"][0]["id"]
+            before = len(authority.writes)
+            original_a = authority.states[a.id]
+            async with await auth(session, ordinary) as nonadmin:
+                refused = await command(nonadmin, 1, "call_service", domain="lightcadence",
+                    service="start_scene", service_data={"scene_id": saved_id})
+                assert not refused["success"], refused
+            assert runtime.manager.owner(a.id) is None
+            denied = await command(ws, 13, "call_service", domain="lightcadence",
+                service="start_scene", service_data={"scene_id": "unknown"})
+            assert not denied["success"], denied
+            assert len(authority.writes) == before
+            await hass.services.async_call("lightcadence", "start_scene", {"scene_id": saved_id}, blocking=True)
+            owner = runtime.manager.owner(a.id)
+            assert owner is not None
+            snapshot = next(s for s in runtime.state()["sessions"] if s["id"] == owner)
+            assert snapshot["scene_origin"]["scene_id"] == saved_id
+            # Library deletion must not prevent stopping an already started scene.
+            zone.command({"op": "library_delete", "revision": 2, "kind": "scenes",
+                          "id": saved_id, "value": None})
+            stopped = await command(ws, 14, "call_service", domain="lightcadence",
+                service="stop_scene", service_data={"scene_id": saved_id})
+            assert stopped["success"], stopped
+            assert runtime.manager.owner(a.id) is None
+            assert authority.states[a.id] == original_a
+            assert len(authority.writes) == before + 1
+            await hass.services.async_call("lightcadence", "stop_scene", {"scene_id": saved_id}, blocking=True)
+            assert len(authority.writes) == before + 1
         assert await hass.config_entries.async_unload(entry_id)
         try:
             await hass.services.async_call("lightcadence", "turn_off", {"entity_id": a.entity_id}, blocking=True)

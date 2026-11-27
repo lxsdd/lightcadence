@@ -46,3 +46,34 @@ turn_off:
         entity:
           filter:
             domain: light
+
+start_scene:
+  name: Start saved LightCadence scene
+  description: Start the current saved scene revision using its enrolled zone, optional spatial path and explicitly named live audio source.
+  fields:
+    scene_id:
+      name: Saved scene UUID
+      required: true
+      selector:
+        text:
+    audio_source_name:
+      name: Unique live audio source name
+      selector:
+        text:
+    floorplan_id:
+      name: Floorplan UUID (with path ID)
+      selector:
+        text:
+    path_id:
+      name: Effect path ID (with floorplan UUID)
+      selector:
+        text:
+stop_scene:
+  name: Stop saved LightCadence scene
+  description: Stop the unique active session explicitly launched from this scene, applying its existing stop policy.
+  fields:
+    scene_id:
+      name: Saved scene UUID
+      required: true
+      selector:
+        text:

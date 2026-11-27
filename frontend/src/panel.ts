@@ -181,6 +181,7 @@ class LightCadencePanel extends LitElement {
     const manual=payload.op==="manual_set" || payload.op==="manual_off";
     if(manual && !this.catalog?.physical_output_enabled) return;
     const epoch=++this.epoch; this.refreshing=false; this.busy=true; this.status="Applying engine command…";
+    if(payload.op==="calibration_project")this.calibrationProjection=undefined;
     try {
       const physical=this.catalog?.physical_output_enabled===true;
       const command=physical?{...payload,instance_id:payload.instance_id??this.snapshot?.instance_id}:payload;

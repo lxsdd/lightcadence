@@ -7,7 +7,7 @@ read back confirmed state after a write. No discovery or implicit activation.
 """
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isfinite
 from time import monotonic
 from typing import Protocol
@@ -39,7 +39,7 @@ class ChromaProfile:
         if (isinstance(self.interval, bool) or not isinstance(self.interval, (int, float))
                 or not isfinite(self.interval) or self.interval < 0):
             raise ValueError("invalid device cadence")
-        if not isinstance(self.host, str) or self.transport not in ("chroma_v2", "yeelight_tcp"):
+        if not isinstance(self.host, str) or self.transport not in ("chroma_v2", "yeelight_tcp", "tuya_v35"):
             raise ValueError("explicit supported local transport required")
         if self.transport == "yeelight_tcp" and self.interval < 1.0:
             raise ValueError("normal Yeelight TCP requires at least one second between frame attempts")
@@ -95,6 +95,10 @@ class ProfiledChroma:
 
     def supports_state(self, state):
         p = self.profile
+        if p.transport == "tuya_v35":
+            return state.kelvin is None
+        if state.native_hsv is not None:
+            return False
         if p.white_kelvin is None:
             return state.kelvin is None
         return state.kelvin is not None and p.ct_min_kelvin <= state.kelvin <= p.ct_max_kelvin
@@ -259,6 +263,9 @@ class PhysicalSessions:
         adapter = self._adapters.get(device_id)
         if adapter is None or not adapter.supports_state(state):
             raise SessionError("manual state not supported by enrolled profile")
+        if adapter.profile.transport == "tuya_v35":
+            # Quantize requested RGB once, before detaching the existing owner.
+            state = adapter.state_port.normalize(adapter.profile, state)
         async with self.manual_handover(device_id):
             await adapter.observe()
             return await self._confirmed_write(adapter, state)
@@ -276,7 +283,7 @@ class PhysicalSessions:
         async with self.manual_handover(device_id):
             adapter = self._adapters[device_id]
             current = await adapter.observe()
-            return await self._confirmed_write(adapter, DeviceState(power, current.target, current.kelvin))
+            return await self._confirmed_write(adapter, replace(current, power=power))
 
     async def manual_off(self, device_id):
         return await self.manual_power(device_id, False)

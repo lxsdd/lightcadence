@@ -178,6 +178,32 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 journal.close()
 
+    async def test_mixed_tuya_and_real_loopback_yeelight(self):
+        from test_tuya_lan import binding, SdkPeer
+        from engine.lightcadence_engine.tuya_lan import compose_mixed_candidate
+        peer = SdkPeer()
+        original = dict(peer.dps)
+        runtime = compose_mixed_candidate([self.tcp_binding()], [binding()],
+                                          enabled=True, timeout=.5, factory=peer)
+        try:
+            state = await runtime.command({"op": "start", "request_id": "mixed", "zone_id": "mixed",
+                "devices": ["tcp-test", "tuya"], "effect": {"kind": "static", "color": [0,1,0]}})
+            await runtime.physical.output.drain()
+            self.assertEqual(self.properties[2], "65280")
+            self.assertEqual(peer.dps["24"][:8], "007803e8")
+            session = state["sessions"][0]
+            # A manually detached Tuya device stays independent at mixed stop.
+            self.assertEqual(await runtime.physical.manual_off("tuya"), "confirmed")
+            self.assertIsNone(runtime.manager.owner("tuya"))
+            current = runtime.manager.snapshot(session["id"])
+            result = await runtime.command({"op": "stop", "session_id": session["id"], "revision": current.revision})
+            self.assertEqual(result["sessions"][0]["phase"], "stopped")
+            self.assertEqual(self.properties[2], "16711680")
+            self.assertFalse(peer.dps["20"])
+            self.assertNotEqual(peer.dps, original)
+        finally:
+            await runtime.close()
+
     async def test_normal_tcp_original_runtime_restore_and_no_udp(self):
         runtime = compose_lan_candidate([self.tcp_binding()], enabled=True, timeout=.5)
         try:

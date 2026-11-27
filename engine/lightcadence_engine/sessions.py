@@ -8,6 +8,7 @@ LAN clients, observe physical light output, or restore actual hardware.
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from math import isfinite
+import re
 from time import monotonic
 from uuid import uuid4
 from typing import Callable, Mapping
@@ -46,6 +47,7 @@ class DeviceState:
     power: bool
     target: LightTarget
     kelvin: int | None = None
+    native_hsv: str | None = None
 
     def __post_init__(self):
         if type(self.power) is not bool or not isinstance(self.target, LightTarget):
@@ -54,6 +56,13 @@ class DeviceState:
                 or (self.target.red, self.target.green, self.target.blue) != (1, 1, 1)
                 or not 0.01 <= self.target.brightness <= 1):
             raise ValueError("invalid color temperature snapshot")
+        if self.native_hsv is not None:
+            if (self.kelvin is not None or not isinstance(self.native_hsv, str)
+                    or not re.fullmatch(r"[0-9a-f]{12}", self.native_hsv)):
+                raise ValueError("invalid native HSV snapshot")
+            h, sat, value = (int(self.native_hsv[i:i+4], 16) for i in (0, 4, 8))
+            if h > 360 or sat > 1000 or value > 1000:
+                raise ValueError("invalid native HSV channels")
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,8 +403,7 @@ class SessionManager:
             if session.policy is StopPolicy.HOLD:
                 continue
             original = session.originals[device]
-            target = original if session.policy is StopPolicy.RESTORE else DeviceState(
-                False, original.target, original.kelvin)
+            target = original if session.policy is StopPolicy.RESTORE else replace(original, power=False)
             session.pending_stop[device] = StopIntent(
                 session.id, session.generation, device, target)
         return tuple(session.pending_stop.values())

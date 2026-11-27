@@ -64,6 +64,23 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 configured_runtime(self.env)
 
+    async def test_dual_mode_explicit_range_and_no_network(self):
+        for transport, interval in (("chroma_v2", .02), ("yeelight_tcp", 1.)):
+            dual = {**self.device, "transport": transport, "interval": interval,
+                    "ct_min_kelvin": 2700, "ct_max_kelvin": 6500}
+            self.save({**self.document, "devices": [dual]})
+            with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+                runtime = configured_runtime(self.env)
+                self.assertEqual(runtime.state()["device_transports"]["synthetic"],
+                    {"kind": transport, "interval_seconds": interval, "dual_mode": True,
+                     "ct_min_kelvin": 2700, "ct_max_kelvin": 6500})
+                await runtime.close()
+            for changes in ({"ct_min_kelvin": None}, {"ct_min_kelvin": True},
+                            {"ct_min_kelvin": 7000}, {"ct_max_kelvin": 9000}):
+                self.save({**self.document, "devices": [{**dual, **changes}]})
+                with self.assertRaises(ValueError):
+                    configured_runtime(self.env)
+
     async def test_invalid_local_documents_fail_closed(self):
         for doc in ({**self.document, "owner_hardware_test": False},
                     {**self.document, "schema_version": True},

@@ -43,13 +43,22 @@ class ChromaProfile:
             raise ValueError("explicit supported local transport required")
         if self.transport == "yeelight_tcp" and self.interval < 1.0:
             raise ValueError("normal Yeelight TCP requires at least one second between frame attempts")
-        ct = (self.ct_min_kelvin, self.white_kelvin, self.ct_max_kelvin)
-        if any(v is not None for v in ct):
-            if (self.transport != "yeelight_tcp" or not all(type(v) is int for v in ct)
-                    or not 1700 <= ct[0] <= ct[1] <= ct[2] <= 6500):
-                raise ValueError("explicit normal TCP white-light temperature and range required")
+        lo, hi = self.ct_min_kelvin, self.ct_max_kelvin
+        if lo is not None or hi is not None or self.white_kelvin is not None:
+            if (self.transport not in ("yeelight_tcp", "chroma_v2")
+                    or type(lo) is not int or type(hi) is not int
+                    or not 1700 <= lo <= hi <= 6500):
+                raise ValueError("explicit Yeelight CT range required")
+            if self.white_kelvin is not None and (
+                    self.transport != "yeelight_tcp" or type(self.white_kelvin) is not int
+                    or not lo <= self.white_kelvin <= hi):
+                raise ValueError("fixed white output requires normal TCP and in-range Kelvin")
         # Reuse original endpoint validation; constructing an adapter opens no socket.
         ChromaV2Adapter(self.device_id, self.host, self.port)
+
+    @property
+    def dual_mode(self):
+        return self.white_kelvin is None and self.ct_min_kelvin is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +96,8 @@ class ProfiledChroma:
         if (not isinstance(value, Observation)
                 or (value.device_id, value.ha_registry_id, value.model, value.firmware)
                 != (p.device_id, p.ha_registry_id, p.model, p.firmware)
-                or value.mode != ("ct" if p.white_kelvin is not None else "rgb")
                 or not isinstance(value.state, DeviceState)
+                or value.mode != ("ct" if value.state.kelvin is not None else "rgb")
                 or not self.supports_state(value.state)):
             raise SessionError("state identity or supported complete snapshot unavailable")
         return value.state
@@ -99,9 +108,10 @@ class ProfiledChroma:
             return state.kelvin is None
         if state.native_hsv is not None:
             return False
-        if p.white_kelvin is None:
-            return state.kelvin is None
-        return state.kelvin is not None and p.ct_min_kelvin <= state.kelvin <= p.ct_max_kelvin
+        if state.kelvin is None:
+            return p.white_kelvin is None
+        return (p.ct_min_kelvin is not None
+                and p.ct_min_kelvin <= state.kelvin <= p.ct_max_kelvin)
 
     async def send_frame(self, frame):
         await self.transport.send_frame(frame)

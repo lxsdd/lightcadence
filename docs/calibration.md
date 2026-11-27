@@ -26,10 +26,15 @@ several white, warm and saturated color anchors and several brightness levels.
 Profile library must be configured persistent for use across restart.
 
 Initial candidate only supports RGB comparison including RGB-projected warm
-white on RGB lamps; native CT mode selection, per-Kelvin curves, physical
-enrollment of dual-mode lamps currently requiring RGB state, HA scene target
-export, multi-client draft recovery, colorimeter support and actual hardware
-acceptance remain open. No household identifiers or values included.
+white on RGB lamps; native CT comparison output and per-Kelvin correction curves, multi-client draft
+recovery, colorimeter support and actual hardware acceptance remain open.
+Explicit dual-mode Yeelight profiles can capture and restore either native RGB
+or CT state while the current comparison output still uses RGB. Set both
+ct_min_kelvin and ct_max_kelvin, omit white_kelvin, and use only owner-verified
+capabilities/range. Both native properties are requested together, and only
+the active mode is decoded. Unsupported or incomplete state is rejected.
+No inferred model or firmware support. An already-off lamp is not flashed
+to alter hidden attributes; an unconfirmed restore retains ownership. No household identifiers or values included.
 
 ## Read-only native HA target proposals
 

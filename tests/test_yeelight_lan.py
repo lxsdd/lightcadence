@@ -76,7 +76,12 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
                 writer.write(b'{"method":"props","params":{"power":"off"}}\r\n')
                 rid = obj["id"] + int(self.wrong_id)
                 if method == "get_prop":
-                    response = {"id": rid, "result": self.properties.copy()}
+                    values = self.properties.copy()
+                    if obj["params"] == ["power", "bright", "rgb", "ct", "color_mode", "flowing", "music_on"]:
+                        power, bright, color, mode, flowing, music = values
+                        values = [power, bright, color if mode == "1" else "",
+                                  color if mode == "2" else "", mode, flowing, music]
+                    response = {"id": rid, "result": values}
                 elif self.reject:
                     response = {"id": rid, "error": {"code": -1}}
                 else:
@@ -105,6 +110,66 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
                           1., self.tcp_port, "yeelight_tcp", 4000, 2700, 6500)
         return LanBinding(p, self.lan_id, self.tcp_port,
                           self.discovery.get_extra_info("sockname")[1])
+
+    def dual_binding(self):
+        p = ChromaProfile("dual", "ha-dual", "synthetic", "1", "127.0.0.1",
+                          1., self.tcp_port, "yeelight_tcp", None, 2700, 6500)
+        return LanBinding(p, self.lan_id, self.tcp_port,
+                          self.discovery.get_extra_info("sockname")[1])
+
+    async def test_dual_mode_rgb_show_restores_native_ct_and_off(self):
+        from engine.lightcadence_engine.sessions import DeviceState
+        from engine.lightcadence_engine.effects import LightTarget
+        for power in ("on", "off"):
+            self.properties = [power, "60", "3000", "2", "0", "0"]
+            runtime = compose_lan_candidate([self.dual_binding()], enabled=True, timeout=.5)
+            try:
+                start = await runtime.command({"op": "start", "request_id": "dual", "zone_id": "zone",
+                    "devices": ["dual"], "effect": {"kind": "static", "color": [0,0,1], "brightness": .8}})
+                await runtime.physical.output.drain()
+                self.assertEqual(self.properties[:4], ["on", "80", "255", "1"])
+                session = start["sessions"][0]
+                end = await runtime.command({"op": "stop", "session_id": session["id"],
+                                             "revision": session["revision"]})
+                self.assertEqual(end["sessions"][0]["phase"], "stopped")
+                self.assertEqual(self.properties[:4], [power, "60", "3000", "2"])
+                self.assertIsNone(runtime.manager.owner("dual"))
+                self.assertEqual(await runtime.physical.manual_set("dual",
+                    DeviceState(True, LightTarget(0,1,0,.5))), "confirmed")
+                self.assertEqual(self.properties[:4], ["on", "50", "65280", "1"])
+                self.assertEqual(await runtime.physical.manual_set("dual",
+                    DeviceState(True, LightTarget(1,1,1,.4), 3500)), "confirmed")
+                self.assertEqual(self.properties[:4], ["on", "40", "3500", "2"])
+            finally:
+                await runtime.close()
+
+    async def test_dual_mode_invalid_state_and_unconfirmed_restore(self):
+        runtime = compose_lan_candidate([self.dual_binding()], enabled=True, timeout=.5)
+        command = {"op": "start", "request_id": "dual", "zone_id": "zone",
+                   "devices": ["dual"], "effect": {"kind": "static", "color": [0,0,1]}}
+        try:
+            for color, mode, flowing in [("2000", "2", "0"), ("", "2", "0"),
+                                         ("120", "3", "0"), ("3000", "2", "1")]:
+                self.properties = ["on", "60", color, mode, flowing, "0"]
+                with self.assertRaises(LanStateError):
+                    await runtime.command(command)
+                self.assertEqual(runtime.manager.snapshots(), ())
+            self.assertTrue(all(m == "get_prop" for m, _ in self.commands))
+            self.properties = ["on", "60", "3000", "2", "0", "0"]
+            start = await runtime.command(command)
+            await runtime.physical.output.drain()
+            s = start["sessions"][0]
+            self.apply = False
+            stop = {"op": "stop", "session_id": s["id"], "revision": s["revision"]}
+            pending = await runtime.command(stop)
+            self.assertEqual(pending["sessions"][0]["phase"], "stopping")
+            self.assertEqual(runtime.manager.owner("dual"), s["id"])
+            self.apply = True
+            done = await runtime.command({**stop, "revision": pending["sessions"][0]["revision"]})
+            self.assertEqual(done["sessions"][0]["phase"], "stopped")
+            self.assertEqual(self.properties[:4], ["on", "60", "3000", "2"])
+        finally:
+            await runtime.close()
 
     async def test_white_output_and_exact_ct_restore(self):
         self.properties = ["on", "60", "3000", "2", "0", "0"]

@@ -265,7 +265,9 @@ class PhysicalRuntime(PreviewRuntime):
         self.enrolled_devices = tuple(sorted(p.device_id for p in profiles))
         self.device_transports = {p.device_id: {"kind": p.transport, "interval_seconds": p.interval,
             **({"white_kelvin": p.white_kelvin, "ct_min_kelvin": p.ct_min_kelvin, "ct_max_kelvin": p.ct_max_kelvin}
-               if p.white_kelvin is not None else {})} for p in profiles}
+               if p.white_kelvin is not None else
+                {"dual_mode": True, "ct_min_kelvin": p.ct_min_kelvin, "ct_max_kelvin": p.ct_max_kelvin}
+                if p.dual_mode else {})} for p in profiles}
 
     def tick(self):
         if self._closing:

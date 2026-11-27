@@ -62,11 +62,15 @@ def _decode_ct(power, brightness, kelvin, profile):
 
 
 def _state_parameters(state, profile):
-    if profile.white_kelvin is None:
+    if not isinstance(state, DeviceState):
+        raise ValueError("invalid device state")
+    if state.kelvin is None:
+        if profile.white_kelvin is not None:
+            raise ValueError("explicit CT state required")
         rgb, bright = _encode(state)
         return ["color", rgb, bright]
-    if not isinstance(state, DeviceState) or state.kelvin is None:
-        raise ValueError("explicit CT state required")
+    if profile.ct_min_kelvin is None:
+        raise ValueError("CT not enrolled")
     bright = round(state.target.brightness * 100)
     if _decode_ct("on" if state.power else "off", bright, state.kelvin, profile) != state:
         raise ValueError("CT state not exactly representable")
@@ -108,7 +112,7 @@ def _capabilities(raw, binding):
                 or headers["model"] != p.model or headers["fw_ver"] != p.firmware
                 or headers["location"] != f"yeelight://{p.host}:{binding.tcp_port}"
                 or not ({"get_prop", "set_scene", "set_power"} |
-                        ({"set_ct_abx"} if p.white_kelvin is not None else set())) <= set(headers["support"].split())):
+                        ({"set_ct_abx"} if p.ct_min_kelvin is not None else set())) <= set(headers["support"].split())):
             raise ValueError
     except (KeyError, ValueError, UnicodeError):
         raise LanStateError("discovery identity or capabilities mismatch") from None
@@ -143,11 +147,18 @@ class _Connection:
 
     async def state(self, profile):
         ct = profile.white_kelvin is not None
-        properties = ["power", "bright", "ct", "color_mode", "flowing", "music_on"] if ct else _PROPERTIES
+        properties = (["power", "bright", "rgb", "ct", "color_mode", "flowing", "music_on"]
+                      if profile.dual_mode else
+                      ["power", "bright", "ct", "color_mode", "flowing", "music_on"] if ct else _PROPERTIES)
         result = await self.call("get_prop", properties)
         if len(result) != len(properties) or not all(isinstance(v, str) for v in result):
             raise LanStateError("incomplete LAN state")
-        power, bright, color, mode, flowing, music = result
+        if profile.dual_mode:
+            power, bright, rgb, kelvin, mode, flowing, music = result
+            ct = mode == "2"
+            color = kelvin if ct else rgb
+        else:
+            power, bright, color, mode, flowing, music = result
         if mode != ("2" if ct else "1") or flowing != "0" or music != "0":
             raise LanStateError("unsupported or active external device mode")
         if not re.fullmatch(r"[0-9]{1,3}", bright) or not re.fullmatch(r"[0-9]{1,8}", color):

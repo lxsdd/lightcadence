@@ -4,7 +4,8 @@ from dataclasses import asdict
 from time import monotonic
 from uuid import uuid4
 
-from .effects import LightTarget, linear_channel, decode_effect
+from .effects import LightTarget, linear_channel, decode_effect, Effect, EffectKind
+from .calibration import compile_profiles, raw_targets, selector
 from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
 from .audio import AudioHub
@@ -68,7 +69,41 @@ class PreviewRuntime:
         self.scene_launches = SceneLaunches()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
+        self.manager.target_correction = self.calibrate
+        self._calibration_cache = (None, {})
+        self.device_bindings = {}
         self.targets = {}
+
+    def calibrate(self, device, target):
+        # Cache compiled immutable profiles by library revision. The normal
+        # manager calls this once after all scene/mixer/audio composition.
+        lib = self.library
+        key = (id(lib), lib.data["revision"])
+        if self._calibration_cache[0] != key:
+            self._calibration_cache = (key, compile_profiles(lib.data["calibrations"]))
+        binding = self.device_bindings.get(device)
+        if binding is None:
+            return target
+        profiles = self._calibration_cache[1]
+        correction = profiles.get(selector({**binding, "device_id": device})) or profiles.get(selector(binding))
+        return target if correction is None else correction.apply(target)
+
+    def library_command(self, body):
+        if body.get("kind") == "calibrations":
+            # No ordinary running show may change calibration under its feet.
+            # Raw comparisons are explicitly exempt because they bypass correction.
+            if any(s.phase is not Phase.STOPPED and self.manager.comparison_state(s.id) is None
+                   for s in self.manager.snapshots()) or getattr(getattr(self, "physical", None), "_reserved", set()):
+                raise ValueError("stop ordinary shows before changing calibration")
+            if body["op"] == "library_save":
+                sel = body["value"]["selector"]
+                selector(sel)
+                device = sel.get("device_id")
+                if device is not None and self.device_bindings.get(device) != {k:v for k,v in sel.items() if k != "device_id"}:
+                    raise ValueError("calibration binding mismatch")
+                if device is None and sel not in self.device_bindings.values():
+                    raise ValueError("unknown enrolled model binding")
+        self.library.command(body)
 
     def tick(self):
         at = self.clock()
@@ -104,7 +139,10 @@ class PreviewRuntime:
         origin = self.scene_launches.origins.get(session.id)
         if origin is not None:
             result["scene_origin"] = dict(origin)
-        if session.phase is Phase.RUNNING:
+        comparison = self.manager.comparison_state(session.id)
+        if comparison is not None:
+            result["comparison"] = {"reference": comparison["reference"], "targets": {d:asdict(t) for d,t in comparison["targets"].items()}}
+        elif session.phase is Phase.RUNNING:
             result["mix"] = self.manager.mix_state(session.id)
         timeline = self.manager.timeline_state(session.id)
         if timeline is not None:
@@ -144,7 +182,7 @@ class PreviewRuntime:
             self.tick()
             return self.state()
         if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete", "library_import"):
-            self.library.command(body)
+            self.library_command(body)
             return self.state()
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",
                                "session_id", "revision", "device_id"))
@@ -214,6 +252,9 @@ class PhysicalRuntime(PreviewRuntime):
         self.scene_launches = SceneLaunches()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
+        self.manager.target_correction = self.calibrate
+        self._calibration_cache = (None, {})
+        self.device_bindings = {p.device_id: {"model":p.model,"firmware":p.firmware,"transport":p.transport} for p in profiles}
         self.targets = {}
         self._closing = False
         self._manual = {}
@@ -257,7 +298,7 @@ class PhysicalRuntime(PreviewRuntime):
         result = super().state()
         result.update(output_mode="physical_candidate", physical_output_enabled=True,
                       hardware_qualified=False, enrolled_devices=self.enrolled_devices,
-                      device_transports=self.device_transports,
+                      device_transports=self.device_transports, calibration_bindings=self.device_bindings,
                       transport_status={
                           device: asdict(status)
                           for device, status in self.physical.output.status.items()
@@ -272,6 +313,25 @@ class PhysicalRuntime(PreviewRuntime):
     async def command(self, body):
         if self._closing:
             raise ValueError("runtime closing")
+        if isinstance(body, dict) and body.get("op") == "calibration_start":
+            fields(body, ("op", "request_id", "devices", "reference", "targets"))
+            devices = body["devices"]
+            if not isinstance(devices, list) or len(devices) < 2 or not all(isinstance(d, str) and d in self.device_bindings for d in devices) or len(set(devices)) != len(devices) or body["reference"] not in devices:
+                raise ValueError("select distinct enrolled comparison lamps")
+            if any(self.device_transports[d].get("white_kelvin") is not None for d in devices):
+                raise ValueError("initial RGB comparison requires RGB capable transport")
+            targets = raw_targets(body["targets"], devices)
+            await self.physical.start(identity(body["request_id"]), "Calibration comparison", devices,
+                Effect(EffectKind.STATIC), StopPolicy.RESTORE, comparison=targets, reference=body["reference"])
+            self.tick()
+            return self.state()
+        if isinstance(body, dict) and body.get("op") == "calibration_adjust":
+            fields(body, ("op", "session_id", "revision", "targets"))
+            sid = identity(body["session_id"])
+            session = self.manager.snapshot(sid)
+            self.manager.comparison_adjust(sid, body["revision"], raw_targets(body["targets"], session.devices))
+            self.tick()
+            return self.state()
         if isinstance(body, dict) and body.get("op") == "scene_start":
             replay, launch = self.scene_launches.prepare(body, self.library)
             if replay is None:
@@ -299,7 +359,7 @@ class PhysicalRuntime(PreviewRuntime):
             self.tick()
             return self.state()
         if isinstance(body, dict) and body.get("op") in ("library_save", "library_delete", "library_import"):
-            self.library.command(body)
+            self.library_command(body)
             return self.state()
         fields(body, ("op",), ("request_id", "zone_id", "devices", "effect", "positions",
                                "session_id", "revision", "device_id", "stop_policy", "state", "record_id", "decision"))

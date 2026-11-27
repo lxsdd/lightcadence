@@ -76,7 +76,15 @@ def validate_preview_selection(hass, payload):
         devices = [f.get("device_id") for f in features if f.get("kind") in ("lamp", "strip")]
         if not devices:
             return
-    elif payload.get("op") in ("start", "scene_start"):
+    elif payload.get("op") == "library_save" and payload.get("kind") == "calibrations":
+        value = payload.get("value")
+        sel = value.get("selector") if isinstance(value, dict) else None
+        if not isinstance(sel, dict):
+            raise ValueError("invalid calibration selector")
+        if "device_id" not in sel:
+            return
+        devices = [sel["device_id"]]
+    elif payload.get("op") in ("start", "scene_start", "calibration_start"):
         devices = payload.get("devices")
     else:
         return

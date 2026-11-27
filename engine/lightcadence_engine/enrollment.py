@@ -163,7 +163,7 @@ class PhysicalSessions:
                 raise Conflict({d: "recovery_required" for d in blocked})
 
     async def start(self, request_id, zone_id, devices, effect, policy=StopPolicy.RESTORE,
-                    positions=None):
+                    positions=None, *, comparison=None, reference=None):
         if any(not isinstance(v, str) or not v.strip() for v in (request_id, zone_id)):
             raise SessionError("stable request and zone identity required")
         selected = tuple(devices)
@@ -179,8 +179,10 @@ class PhysicalSessions:
                 or not all(type(v) in (int, float) and isfinite(v) and 0 <= v <= 1
                            for v in coordinates.values())):
             raise SessionError("invalid device positions")
+        if comparison is not None and (set(comparison) != set(selected) or reference not in selected or len(selected) < 2 or policy is not StopPolicy.RESTORE):
+            raise SessionError("invalid comparison selection")
         fingerprint = (zone_id, selected, effect, policy,
-                       None if coordinates is None else tuple(sorted(coordinates.items())))
+                       None if coordinates is None else tuple(sorted(coordinates.items())), None if comparison is None else tuple(sorted(comparison.items())), reference)
         previous = self._requests.get(request_id)
         if previous is not None:
             if previous[0] != fingerprint:
@@ -209,7 +211,7 @@ class PhysicalSessions:
                 recorded = True
             attempted = [self._adapters[d].transport for d in selected]
             await self._settle([adapter.acquire() for adapter in attempted])
-            session = self.manager.start(request_id, zone_id, originals, effect, policy, coordinates)
+            session = self.manager.start(request_id, zone_id, originals, effect, policy, coordinates, comparison=comparison, reference=reference)
             self._requests[request_id] = (fingerprint, session.id)
             return session
         except BaseException:

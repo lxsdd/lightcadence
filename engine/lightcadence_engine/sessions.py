@@ -123,6 +123,8 @@ class _Session:
     gains: list[float] = field(default_factory=list)
     muted: list[bool] = field(default_factory=list)
     solo: list[bool] = field(default_factory=list)
+    comparison: dict[str, LightTarget] | None = None
+    reference: str | None = None
 
     def snapshot(self) -> SessionSnapshot:
         return SessionSnapshot(
@@ -138,6 +140,7 @@ class SessionManager:
     def __init__(self, clock: Callable[[], float] = monotonic):
         self._clock = clock
         self.audio_provider = None
+        self.target_correction = None
         self._sessions: dict[str, _Session] = {}
         self._owners: dict[str, str] = {}
         self._requests: dict[str, tuple[tuple, str]] = {}
@@ -171,7 +174,7 @@ class SessionManager:
 
     def start(self, request_id: str, zone_id: str, devices: Mapping[str, DeviceState],
               effect: Effect, stop_policy: StopPolicy = StopPolicy.RESTORE,
-              positions: Mapping[str, float] | None = None) -> SessionSnapshot:
+              positions: Mapping[str, float] | None = None, *, comparison=None, reference=None) -> SessionSnapshot:
         self._identity(request_id)
         self._identity(zone_id)
         if not isinstance(effect, Effect) or not isinstance(stop_policy, StopPolicy):
@@ -194,8 +197,10 @@ class SessionManager:
             if not all(isinstance(x, (int, float)) and not isinstance(x, bool)
                        and isfinite(x) and 0 <= x <= 1 for x in coordinates.values()):
                 raise SessionError("invalid device position")
+        if comparison is not None and (set(comparison) != set(originals) or reference not in originals or len(originals) < 2 or stop_policy is not StopPolicy.RESTORE or not all(isinstance(v, LightTarget) for v in comparison.values())):
+            raise SessionError("invalid calibration comparison")
         fingerprint = (zone_id, tuple(originals.items()), effect, stop_policy,
-                       tuple(sorted(coordinates.items())))
+                       tuple(sorted(coordinates.items())), None if comparison is None else tuple(sorted(comparison.items())), reference)
         previous = self._requests.get(request_id)
         if previous is not None:
             if previous[0] != fingerprint:
@@ -209,6 +214,8 @@ class SessionManager:
             raise SessionError("invalid engine clock")
         session = _Session(str(uuid4()), zone_id, effect, coordinates, originals,
                            stop_policy, now)
+        session.comparison = None if comparison is None else dict(comparison)
+        session.reference = reference
         count = len(effect.layers) + len(effect.tracks)
         session.gains = [1.] * count
         session.muted = [False] * count
@@ -315,7 +322,7 @@ class SessionManager:
 
     def mix_control(self, session_id, revision, action, value, index=None):
         session = self._revision(session_id, revision)
-        if session.phase is not Phase.RUNNING:
+        if session.phase is not Phase.RUNNING or session.comparison is not None:
             raise SessionError("session not controllable")
         if action in ("master", "gain"):
             if type(value) not in (int, float) or not isfinite(value) or not 0 <= value <= 1:
@@ -348,6 +355,24 @@ class SessionManager:
             session.latest.pop(device, None)
         return session.snapshot()
 
+    def comparison_state(self, session_id):
+        session = self._get(session_id)
+        if session.comparison is None:
+            return None
+        return {"reference": session.reference, "targets": {d:t for d,t in session.comparison.items() if d in session.positions}}
+
+    def comparison_adjust(self, session_id, revision, targets):
+        session = self._revision(session_id, revision)
+        if session.phase is not Phase.RUNNING or session.comparison is None or set(targets) != set(session.positions):
+            raise SessionError("comparison session not adjustable")
+        session.comparison = dict(targets)
+        session.revision += 1
+        session.generation += 1
+        for device in session.positions:
+            self._mailboxes.pop(device, None)
+            session.latest.pop(device, None)
+        return session.snapshot()
+
     def render(self, session_id: str, target_time: float | None = None) -> int:
         session = self._get(session_id)
         if session.phase is not Phase.RUNNING:
@@ -367,8 +392,13 @@ class SessionManager:
         gains = tuple(0. if muted or (has_solo and not solo) else gain
                       for gain, muted, solo in zip(session.gains, session.muted, session.solo))
         for device, position in session.positions.items():
-            target = session.effect.render(elapsed, position, audio, device, gains)
-            target = replace(target, brightness=target.brightness * session.master_gain)
+            if session.comparison is not None:
+                target = session.comparison[device]
+            else:
+                target = session.effect.render(elapsed, position, audio, device, gains)
+                target = replace(target, brightness=target.brightness * session.master_gain)
+                if self.target_correction is not None:
+                    target = self.target_correction(device, target)
             frame = Frame(session.id, session.generation, device, session.sequence, at, target)
             session.latest[device] = frame.sequence
             self._mailboxes[device] = frame

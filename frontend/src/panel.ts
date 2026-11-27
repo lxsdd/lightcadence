@@ -2,6 +2,8 @@ import {LitElement, html, nothing} from "lit";
 import {workspaceStyles} from "./workspace-styles";
 import "./floorplan";
 import "./timeline";
+import "./calibration";
+import type {CalibrationCommand, CalibrationRow} from "./calibration";
 import {validTiming} from "./timeline";
 import type {Track,Timing} from "./timeline";
 import type {Plan,SpatialPath} from "./floorplan";
@@ -10,7 +12,7 @@ type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
 type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; transport?: {kind:string;interval_seconds:number;white_kelvin?:number;ct_min_kelvin?:number;ct_max_kelvin?:number}|null; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type MixState={master:number;groups:{gain:number;muted:boolean;solo:boolean}[]};
-type Session = {scene_origin?:{scene_id:string;scene_revision:number;scene_name:string};mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
+type Session = {comparison?:{reference:string;targets:Record<string,RGB>};scene_origin?:{scene_id:string;scene_revision:number;scene_name:string};mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
 type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB;kelvin?:number}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number;kind?:string;clock_mapping?:string;read_to_engine_seconds?:number|null;transport_jitter_seconds?:number|null};
@@ -21,15 +23,15 @@ type Zone={id:string;name:string;revision:number;devices:string[]};
 type NativeScene={id:string;entity_id:string;name:string;native:boolean};
 type NativeInspection={scene_id:string;entity_id:string;name:string;fingerprint:string;importable:boolean;targets:{device_id:string;entity_id:string;rgb:number[];brightness:number}[];problems:{entity_id:string;reason:string}[]};
 type Scene={ha_source?:{registry_id:string;fingerprint:string};id:string;name:string;revision:number;zone_id:string;effect:PresetEffect;stop_policy:StopPolicy};
-type Library={floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
+type Library={calibrations?:CalibrationRow[];floorplans?:Plan[];spatial_paths?:SpatialPath[];revision:number;zones:Zone[];scenes:Scene[];persistent:boolean;fault:boolean};
 type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revision:number;kind:"zones"|"scenes"|"floorplans";id:string|null;value:Record<string,unknown>|null};
-type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
+type Snapshot = {calibration_bindings?:Record<string,{model:string;firmware:string;transport:string}>;library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
 type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: Timing & {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean}};
 type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; brightness_pct: number} & ({rgb:number[]}|{kelvin:number})} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
 type TimelineControl={op:"timeline_control";instance_id:string;session_id:string;revision:number;action:"pause"|"resume"|"seek";position?:number};
 type MixControl={op:"mix_control";instance_id:string;session_id:string;revision:number;action:"master"|"gain"|"mute"|"solo";value:number|boolean;index?:number};
-type Command = MixControl | TimelineControl | LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
+type Command = CalibrationCommand | MixControl | TimelineControl | LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum",static:"Static colour",layered:"Layered scene",timeline:"Timeline Studio"};
@@ -59,9 +61,10 @@ class LightCadencePanel extends LitElement {
   static properties = {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
     zone:{state:true}, effect:{state:true},layers:{state:true}, tracks:{state:true},timing:{state:true},timelineLoop:{state:true},timelineAutoEnd:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
-    busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
+    calibrationOpen:{state:true}, busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
     nativeScenes:{state:true},nativeSelected:{state:true},nativeInspection:{state:true},nativeName:{state:true},manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, manualKelvin:{state:true}, pendingManual:{state:true},
   };
+  declare calibrationOpen:boolean;
   declare nativeScenes:NativeScene[];
   declare nativeSelected:string;
   declare nativeInspection?:NativeInspection;
@@ -104,7 +107,7 @@ class LightCadencePanel extends LitElement {
   private entry?: string;
   private refreshing = false;
   constructor() {
-    super(); this.nativeScenes=[];this.nativeSelected="";this.nativeName="";this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timing={};this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
+    super(); this.calibrationOpen=false; this.nativeScenes=[];this.nativeSelected="";this.nativeName="";this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timing={};this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
     this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.manualKelvin=4000; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
@@ -357,6 +360,7 @@ class LightCadencePanel extends LitElement {
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
         ${lib?.floorplans?html`<button aria-expanded=${String(this.floorplanOpen)} @click=${()=>this.floorplanOpen=!this.floorplanOpen}>${this.floorplanOpen?"Hide floorplan editor":"Open floorplan editor"}</button>`:nothing}
         ${lib?.floorplans?html`<section ?hidden=${!this.floorplanOpen} aria-labelledby="floorplan"><h2 id="floorplan">Floorplan editor</h2><lightcadence-floorplan .library=${lib} .lights=${this.catalog?.lights??[]} .instanceId=${this.snapshot?.instance_id??""} .disabled=${libraryLocked} .targetColors=${Object.fromEntries(Object.entries(this.snapshot?.targets??{}).map(([id,v])=>[id,color(v.target)]))} @floorplan-command=${(e:CustomEvent<LibraryCommand>)=>this.send(e.detail)}></lightcadence-floorplan></section>`:nothing}
+        ${physical&&lib?.calibrations&&this.snapshot?.calibration_bindings?html`<button aria-expanded=${String(this.calibrationOpen)} @click=${()=>this.calibrationOpen=!this.calibrationOpen}>${this.calibrationOpen?"Hide calibration":"Open calibration assistant"}</button><section ?hidden=${!this.calibrationOpen} aria-labelledby="calibration-title"><h2 id="calibration-title">Calibration assistant</h2><lightcadence-calibration .lights=${this.catalog?.lights??[]} .snapshot=${this.snapshot} .disabled=${formLocked||!this.online||!!this.pendingManual} @calibration-command=${(e:CustomEvent<CalibrationCommand>)=>this.send(e.detail)}></lightcadence-calibration></section>`:nothing}
         <div class="workspace">
           <section aria-labelledby="setup"><h2 id="setup">${physical?"New zone show":"New zone preview"}</h2>
             <label>Zone name <input aria-label="Zone name" title="Label for this independent preview session" .value=${this.zone} ?disabled=${formLocked} @input=${(e:Event)=>this.zone=(e.target as HTMLInputElement).value}></label>

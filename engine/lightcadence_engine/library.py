@@ -14,6 +14,7 @@ from .chroma import _unique_pairs
 from .effects import decode_effect, encode_preset
 from .sessions import StaleRevision, StopPolicy
 from .spatial import geometry, spatial_paths
+from .calibration import Correction, compile_profiles, PROFILE_FIELDS
 
 
 def exact(obj, keys):
@@ -45,7 +46,7 @@ class ProjectLibrary:
         self.directory = Path(directory) if directory is not None else None
         self.lock = None
         self.fault = False
-        self.data = {"schema_version": 1, "revision": 0, "zones": [], "scenes": [], "floorplans": []}
+        self.data = {"schema_version": 1, "revision": 0, "zones": [], "scenes": [], "floorplans": [], "calibrations": []}
         if self.directory is not None:
             try:
                 self.lock = os.open(self.directory / "library.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -58,6 +59,8 @@ class ProjectLibrary:
                     # Additive v1 extension: only the exact old document shape is migrated.
                     if isinstance(self.data, dict) and set(self.data) == {"schema_version", "revision", "zones", "scenes"}:
                         self.data["floorplans"] = []
+                    if isinstance(self.data, dict) and set(self.data) == {"schema_version", "revision", "zones", "scenes", "floorplans"}:
+                        self.data["calibrations"] = []
                     self.validate(self.data)
             except BaseException:
                 self.close()
@@ -65,18 +68,18 @@ class ProjectLibrary:
 
     @staticmethod
     def validate(doc):
-        exact(doc, ("schema_version", "revision", "zones", "scenes", "floorplans"))
+        exact(doc, ("schema_version", "revision", "zones", "scenes", "floorplans", "calibrations"))
         if type(doc["schema_version"]) is not int or doc["schema_version"] != 1 or type(doc["revision"]) is not int or doc["revision"] < 0:
             raise ValueError("invalid library version")
         ids = set()
         zones = set()
         zone_members = {}
-        for kind in ("zones", "scenes", "floorplans"):
+        for kind in ("zones", "scenes", "floorplans", "calibrations"):
             if not isinstance(doc[kind], list):
                 raise ValueError("invalid library collection")
             for obj in doc[kind]:
                 keys = ("schema_version", "id", "revision", "updated_at", "name")
-                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") + (("ha_source",) if isinstance(obj, dict) and "ha_source" in obj else ()) if kind == "scenes" else ("width", "height", "features")))
+                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") + (("ha_source",) if isinstance(obj, dict) and "ha_source" in obj else ()) if kind == "scenes" else PROFILE_FIELDS[1:] if kind == "calibrations" else ("width", "height", "features")))
                 if (type(obj["schema_version"]) is not int or obj["schema_version"] != 1 or
                         type(obj["revision"]) is not int or obj["revision"] < 1 or
                         not isinstance(obj["id"], str) or str(UUID(obj["id"])) != obj["id"] or obj["id"] in ids):
@@ -99,8 +102,9 @@ class ProjectLibrary:
                         exact(source, ("registry_id", "fingerprint"))
                         if not isinstance(source["registry_id"], str) or not source["registry_id"].strip() or not isinstance(source["fingerprint"], str) or not re.fullmatch("[0-9a-f]{64}", source["fingerprint"]):
                             raise ValueError("invalid HA import provenance")
-                else:
+                elif kind == "floorplans":
                     geometry(obj, zones)
+        compile_profiles(doc["calibrations"])
 
     def snapshot(self):
         return {**deepcopy(self.data), "persistent": self.directory is not None, "fault": self.fault,
@@ -115,7 +119,7 @@ class ProjectLibrary:
         if type(body["revision"]) is not int or body["revision"] != self.data["revision"]:
             raise StaleRevision("refresh library")
         kind = body["kind"]
-        if kind not in ("zones", "scenes", "floorplans"):
+        if kind not in ("zones", "scenes", "floorplans", "calibrations"):
             raise ValueError("unknown library collection")
         doc = deepcopy(self.data)
         rows = doc[kind]
@@ -136,6 +140,10 @@ class ProjectLibrary:
                 exact(value, ("name", "zone_id", "effect", "stop_policy"))
                 item = {"name": name(value["name"]), "zone_id": value["zone_id"],
                         "effect": effect(value["effect"]), "stop_policy": StopPolicy(value["stop_policy"]).value}
+            elif kind == "calibrations":
+                Correction.decode(value)
+                item = deepcopy(value)
+                item["name"] = name(item["name"])
             else:
                 exact(value, ("name", "width", "height", "features"))
                 item = deepcopy(value)

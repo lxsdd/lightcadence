@@ -20,6 +20,7 @@ class EffectKind(StrEnum):
     PULSE = "pulse"
     AUDIO_SPECTRUM = "audio_spectrum"
     STATIC = "static"
+    WHITE = "white"
     LAYERED = "layered"
     TIMELINE = "timeline"
 
@@ -64,6 +65,7 @@ class Effect:
     auto_end: bool = False
     tempo_map: TempoMap | None = None
     markers: tuple[Marker, ...] = ()
+    kelvin: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.kind, EffectKind):
@@ -78,6 +80,10 @@ class Effect:
         if not isinstance(self.color, tuple) or len(self.color) != 3:
             raise ValueError("color must be an immutable RGB triple")
         LightTarget(*self.color, self.brightness)
+        if self.kind is EffectKind.WHITE:
+            KelvinTarget(*self.color, self.brightness, self.kelvin)
+        elif self.kelvin is not None:
+            raise ValueError("Kelvin requires explicit white effect")
         if not isinstance(self.layers, tuple) or not all(isinstance(layer, Layer) for layer in self.layers):
             raise ValueError("invalid layers")
         if type(self.loop) is not bool or not isinstance(self.tracks, tuple) or not all(isinstance(t, Track) for t in self.tracks):
@@ -154,6 +160,33 @@ class Effect:
                 covered.update(selected if mask is None else mask)
         if groups and covered != selected:
             raise ValueError("every selected lamp must belong to a nonempty layer or track")
+        self.white_goals(devices)
+
+    def white_goals(self, devices):
+        """Enumerate every reachable white goal; reject undefined cross-mode blends."""
+        goals = []
+        for device in devices:
+            if self.kind is EffectKind.WHITE:
+                goals.append((device, self.kelvin))
+                continue
+            if self.kind is EffectKind.LAYERED:
+                spans = [(0., 1., l) for l in self.layers
+                         if l.devices is None or device in l.devices]
+            elif self.kind is EffectKind.TIMELINE:
+                spans = [(c.start, c.start+c.duration, c.layer)
+                         for t in self.tracks if t.devices is None or device in t.devices
+                         for c in t.clips]
+            else:
+                continue
+            for i, (start, end, layer) in enumerate(spans):
+                if layer.effect.kind is not EffectKind.WHITE:
+                    continue
+                if layer.blend is not Blend.OVER or any(
+                        i != j and start < b and a < end
+                        for j, (a, b, _) in enumerate(spans)):
+                    raise ValueError("white targets require exclusive nonoverlapping lamp spans and over blend")
+                goals.append((device, layer.effect.kelvin))
+        return tuple(goals)
 
     def render(self, elapsed: float, position: float, audio=None, device_id=None, group_gains=None) -> LightTarget:
         if (not isfinite(elapsed) or elapsed < 0 or
@@ -178,11 +211,12 @@ class Effect:
                     local = at - clip.start
                     if 0 <= local < clip.duration:
                         target = clip.layer.effect.render(max(0., seconds - self.seconds(clip.start)), position, audio)
-                        rgb = blend_linear(rgb, target, clip.level(local) * gain, clip.layer.blend)
-            peak = max(rgb)
-            return LightTarget(*(v / peak if peak else 0. for v in rgb), peak * self.brightness)
+                        rgb = compose_target(rgb, target, clip.level(local) * gain, clip.layer.blend)
+            return finish_composition(rgb, self.brightness)
         if self.kind is EffectKind.STATIC:
             return LightTarget(*self.color, self.brightness)
+        if self.kind is EffectKind.WHITE:
+            return KelvinTarget(1, 1, 1, self.brightness, self.kelvin)
         if self.kind is EffectKind.LAYERED:
             rgb = (0., 0., 0.)
             for index, layer in enumerate(self.layers):
@@ -192,9 +226,8 @@ class Effect:
                 if layer.devices is not None and device_id not in layer.devices:
                     continue
                 target = layer.effect.render(elapsed, position, audio)
-                rgb = blend_linear(rgb, target, layer.opacity * gain, layer.blend)
-            peak = max(rgb)
-            return LightTarget(*(v / peak if peak else 0. for v in rgb), peak * self.brightness)
+                rgb = compose_target(rgb, target, layer.opacity * gain, layer.blend)
+            return finish_composition(rgb, self.brightness)
         if self.kind is EffectKind.AUDIO_SPECTRUM:
             bands = audio if audio is not None else (.06, .06, .06)
             LightTarget(*bands, 1.)
@@ -323,8 +356,27 @@ def decode_mask(obj):
     return result
 
 
+def compose_target(base, target, opacity, blend):
+    if isinstance(base, KelvinTarget):
+        raise ValueError("overlapping explicit white targets are undefined")
+    if isinstance(target, KelvinTarget):
+        if max(base) or blend is not Blend.OVER:
+            raise ValueError("overlapping explicit white targets are undefined")
+        return KelvinTarget(1, 1, 1, target.brightness * opacity, target.kelvin)
+    return blend_linear(base, target, opacity, blend)
+
+
+def finish_composition(base, brightness):
+    if isinstance(base, KelvinTarget):
+        return KelvinTarget(1, 1, 1, base.brightness * brightness, base.kelvin)
+    peak = max(base)
+    return LightTarget(*(v / peak if peak else 0. for v in base), peak * brightness)
+
+
 def blend_linear(base, target, opacity, blend):
     """Combine premultiplied linear-light energy; normalize once at the output."""
+    if isinstance(target, KelvinTarget):
+        raise ValueError("explicit white target cannot use RGB blending")
     rgb = (target.red, target.green, target.blue)
     # Effect brightness determines coverage for OVER, so a scanner's dark
     # region reveals the underlying ambient layer rather than erasing it.
@@ -339,12 +391,16 @@ def blend_linear(base, target, opacity, blend):
 def decode_effect(value, *, template=False):
     """Shared API/preset parser. Persisted presets never contain live source IDs."""
     base = {"kind", "period_seconds", "brightness", "color", "width"}
-    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"layers", "tracks", "loop", "auto_end", "tempo_map", "markers"} | (set() if template else {"audio_source"}):
+    if not isinstance(value, dict) or "kind" not in value or not value.keys() <= base | {"kelvin", "layers", "tracks", "loop", "auto_end", "tempo_map", "markers"} | (set() if template else {"audio_source"}):
         raise ValueError("invalid effect fields")
     if template and not base <= value.keys():
         raise ValueError("incomplete preset")
     params = dict(value)
     kind = EffectKind(params.pop("kind"))
+    if ("kelvin" in params) != (kind is EffectKind.WHITE):
+        raise ValueError("explicit Kelvin required only for white effect")
+    if kind is EffectKind.WHITE and "color" not in params:
+        params["color"] = [1, 1, 1]
     raw_layers = params.pop("layers", None)
     raw_tracks = params.pop("tracks", None)
     loop = params.pop("loop", True)
@@ -373,7 +429,7 @@ def decode_effect(value, *, template=False):
                 if not isinstance(layer, dict) or set(layer) != {"effect", "opacity", "blend"}:
                     raise ValueError("invalid clip layer")
                 child = layer["effect"]
-                if not isinstance(child, dict) or set(child) != base or child["kind"] in ("layered", "timeline"):
+                if not isinstance(child, dict) or not base <= child.keys() or not child.keys() <= base | {"kelvin"} or child["kind"] in ("layered", "timeline"):
                     raise ValueError("invalid clip effect")
                 if child["kind"] == "audio_spectrum":
                     if template:
@@ -399,7 +455,7 @@ def decode_effect(value, *, template=False):
             if not isinstance(raw, dict) or not {"effect", "opacity", "blend"} <= raw.keys() or not raw.keys() <= {"effect", "opacity", "blend", "devices"}:
                 raise ValueError("invalid layer fields")
             child = raw["effect"]
-            if not isinstance(child, dict) or set(child) != base or child["kind"] in ("layered", "timeline"):
+            if not isinstance(child, dict) or not base <= child.keys() or not child.keys() <= base | {"kelvin"} or child["kind"] in ("layered", "timeline"):
                 raise ValueError("invalid nested effect")
             if child["kind"] == "audio_spectrum":
                 if template:
@@ -417,6 +473,8 @@ def decode_effect(value, *, template=False):
 def encode_preset(spec):
     result = {"kind": spec.kind.value, "period_seconds": spec.period_seconds,
               "brightness": spec.brightness, "color": list(spec.color), "width": spec.width}
+    if spec.kind is EffectKind.WHITE:
+        result["kelvin"] = spec.kelvin
     if spec.kind is EffectKind.LAYERED:
         result["layers"] = [{"effect": encode_preset(layer.effect), "opacity": layer.opacity,
                              "blend": layer.blend.value, **({"devices": list(layer.devices)} if layer.devices is not None else {})} for layer in spec.layers]

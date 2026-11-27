@@ -161,11 +161,11 @@ def supports_native_white(transport):
     return transport.get("kind") == "yeelight_tcp" and transport.get("ct_min_kelvin") is not None
 
 
-def validate_raw(target, transport):
+def validate_raw(target, transport, *, allow_dim=False):
     if isinstance(target, KelvinTarget):
         if (not supports_native_white(transport) or
                 not transport["ct_min_kelvin"] <= target.kelvin <= transport["ct_max_kelvin"]
-                or round(target.brightness * 100) < 1):
+                or (not allow_dim and round(target.brightness * 100) < 1)):
             raise ValueError("native Kelvin target outside enrolled TCP capabilities")
     elif transport.get("white_kelvin") is not None:
         raise ValueError("white-only lamp needs an explicit Kelvin comparison target")

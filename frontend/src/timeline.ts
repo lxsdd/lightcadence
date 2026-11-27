@@ -1,6 +1,6 @@
 import {LitElement, html, css} from "lit";
 
-type Leaf={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
+type Leaf={kind:string;period_seconds:number;brightness:number;color:number[];width:number;kelvin?:number};
 type Key={time:number;value:number;curve:"linear"|"hold"|"smooth"};
 type Clip={start:number;duration:number;fade_in:number;fade_out:number;layer:{effect:Leaf;opacity:number;blend:"over"|"add"|"max"};keyframes:Key[]};
 export type TempoPoint={beat:number;bpm:number};
@@ -100,10 +100,10 @@ class TimelineEditor extends LitElement {
         <button aria-label=${"Remove track "+(ti+1)} ?disabled=${this.locked} @click=${()=>{this.edit(ts=>ts.splice(ti,1));this.selected="";}}>Remove track</button></div></article>`)}
     <button ?disabled=${this.locked} @click=${()=>this.edit(t=>t.push({name:"Track "+(t.length+1),clips:[]}))}>Add track</button>
     ${clip?html`<article><h3>Clip inspector · ${i+1}/${j+1}</h3>
-      <label>Clip effect <select aria-label="Clip effect" .value=${clip.layer.effect.kind} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect.kind=(e.target as HTMLSelectElement).value)}>${["static","rainbow","scanner","pulse","audio_spectrum"].map(k=>html`<option value=${k}>${k}</option>`)}</select></label>
+      <label>Clip effect <select aria-label="Clip effect" .value=${clip.layer.effect.kind} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>{const leaf=c.layer.effect;leaf.kind=(e.target as HTMLSelectElement).value;if(leaf.kind==="white"){leaf.color=[1,1,1];leaf.kelvin=3000;}else delete leaf.kelvin;})}>${["static","white","rainbow","scanner","pulse","audio_spectrum"].map(k=>html`<option value=${k}>${k}</option>`)}</select></label>
       ${(["start","duration","fade_in","fade_out"] as const).map(k=>html`<label>${k} (${unit}) <input aria-label=${"Clip "+k} type="number" step="any" min="0" .value=${String(clip[k])} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c[k]=(e.target as HTMLInputElement).valueAsNumber)}></label>`)}
       ${(["period_seconds","brightness","width"] as const).map(k=>html`<label>${k} <input aria-label=${"Clip "+k} type="number" step="any" .value=${String(clip.layer.effect[k])} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect[k]=(e.target as HTMLInputElement).valueAsNumber)}></label>`)}
-      <label>Colour <input aria-label="Clip colour" type="color" .value=${this.hex(clip.layer.effect.color)} ?disabled=${this.locked} @input=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect.color=this.rgb((e.target as HTMLInputElement).value))}></label>
+      ${clip.layer.effect.kind==="white"?html`<label>White temperature (K) <input aria-label="Clip Kelvin" type="number" min="1700" max="6500" step="1" .value=${String(clip.layer.effect.kelvin)} ?disabled=${this.locked} @input=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect.kelvin=(e.target as HTMLInputElement).valueAsNumber)}></label>`:html`<label>Colour <input aria-label="Clip colour" type="color" .value=${this.hex(clip.layer.effect.color)} ?disabled=${this.locked} @input=${(e:Event)=>this.setClip(i,j,c=>c.layer.effect.color=this.rgb((e.target as HTMLInputElement).value))}></label>`}
       <label>Opacity <input aria-label="Clip opacity" type="number" min="0" max="1" step="any" .value=${String(clip.layer.opacity)} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.opacity=(e.target as HTMLInputElement).valueAsNumber)}></label>
       <label>Blend <select aria-label="Clip blend" .value=${clip.layer.blend} ?disabled=${this.locked} @change=${(e:Event)=>this.setClip(i,j,c=>c.layer.blend=(e.target as HTMLSelectElement).value as Clip["layer"]["blend"])}>${["over","add","max"].map(k=>html`<option value=${k}>${k}</option>`)}</select></label>
       <h3>Opacity keyframes</h3><p>Clip-local ${unit}; increasing times, outgoing curve.</p>

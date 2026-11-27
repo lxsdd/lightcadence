@@ -159,6 +159,7 @@ class PhysicalSessions:
         self._reserved = set()
         self._pending = set()
         self._requests = {}
+        self.white_preflight = None
 
     def _release(self, device):
         self._adapters[device].transport.close()
@@ -205,6 +206,10 @@ class PhysicalSessions:
         if conflicts:
             raise Conflict(conflicts)
         self._check_recovery(selected)
+        if comparison is None and effect.white_goals(selected):
+            if self.white_preflight is None:
+                raise SessionError("explicit white goals require capability and calibration preflight")
+            self.white_preflight(effect, selected)
         self._reserved.update(selected)
         self._pending.add(request_id)
         attempted = []

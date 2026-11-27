@@ -2,9 +2,9 @@
 import tempfile
 import unittest
 from engine.lightcadence_engine.calibration import Correction
-from engine.lightcadence_engine.effects import LightTarget, KelvinTarget, linear_channel, Effect, EffectKind
+from engine.lightcadence_engine.effects import LightTarget, KelvinTarget, linear_channel, Effect, EffectKind, decode_effect, encode_preset
 from engine.lightcadence_engine.library import ProjectLibrary
-from engine.lightcadence_engine.runtime import PhysicalRuntime
+from engine.lightcadence_engine.runtime import PhysicalRuntime, PreviewRuntime
 from engine.lightcadence_engine.enrollment import ChromaProfile, Observation
 from engine.lightcadence_engine.sessions import DeviceState, Conflict, StaleRevision
 
@@ -131,4 +131,88 @@ class CalibrationTests(unittest.IsolatedAsyncioTestCase):
             normal=await runtime.command(dict(op="start",request_id="normal",zone_id="normal",devices=["a"],effect={"kind":"static","color":[linear_channel(v) for v in [255,100,0]],"brightness":.5}))
             self.assertEqual(normal["targets"]["a"]["target"]["brightness"],.4)
             with self.assertRaises(ValueError): await runtime.command({**cmd,"revision":1})
+        finally: await runtime.close()
+
+
+WHITE={"kind":"white","period_seconds":4,"brightness":.5,"color":[1,1,1],"width":.25,"kelvin":3500}
+RGB={"kind":"static","period_seconds":4,"brightness":1,"color":[1,0,0],"width":.25}
+
+def clip(effect,start=0,duration=2,fade_in=0):
+    return {"start":start,"duration":duration,"fade_in":fade_in,"fade_out":0,
+            "layer":{"effect":effect,"opacity":1,"blend":"over"},"keyframes":[]}
+
+def timeline(*clips):
+    return {**RGB,"kind":"timeline","tracks":[{"name":"White and colour","clips":list(clips)}],"loop":False}
+
+class WhiteSceneTests(unittest.IsolatedAsyncioTestCase):
+    def test_white_roundtrip_timeline_and_overlap(self):
+        spec=decode_effect(WHITE,template=True)
+        self.assertEqual(encode_preset(spec),WHITE)
+        self.assertEqual(spec.render(0,0),KelvinTarget(1,1,1,.5,3500))
+        for bad in ({**WHITE,"kelvin":None},{**WHITE,"kelvin":True},{**WHITE,"color":[1,0,0]},
+                    {**RGB,"kelvin":3500}, {**WHITE,"kelvin":6600}):
+            with self.assertRaises(ValueError): decode_effect(bad)
+        composition=timeline(clip(WHITE,fade_in=1),clip(RGB,start=2))
+        spec=decode_effect(composition,template=True)
+        self.assertEqual(encode_preset(spec),composition)
+        spec.validate_targets(["a"])
+        self.assertEqual(spec.render(.5,0,device_id="a"),KelvinTarget(1,1,1,.25,3500))
+        self.assertEqual(spec.render(2,0,device_id="a"),LightTarget(1,0,0,1))
+        with self.assertRaises(ValueError):
+            decode_effect(timeline(clip(WHITE),clip(RGB,start=1))).validate_targets(["a"])
+        layered={**RGB,"kind":"layered","layers":[{"effect":WHITE,"opacity":.5,"blend":"over","devices":["a"]},
+                                                  {"effect":RGB,"opacity":1,"blend":"over","devices":["b"]}]}
+        spec=decode_effect(layered)
+        spec.validate_targets(["a","b"])
+        self.assertEqual(spec.render(0,0,device_id="a"),KelvinTarget(1,1,1,.25,3500))
+        self.assertEqual(spec.render(0,0,device_id="b"),LightTarget(1,0,0,1))
+        with self.assertRaises(ValueError):
+            decode_effect({**layered,"layers":[{**layered["layers"][0],"blend":"add"},layered["layers"][1]]}).validate_targets(["a","b"])
+
+    async def test_saved_white_preview_and_physical_preflight(self):
+        preview=PreviewRuntime(lambda:0.)
+        try:
+            preview.command(dict(op="library_save",kind="zones",id=None,revision=0,value={"name":"White zone","devices":["a","b"]}))
+            zone=preview.library.snapshot()["zones"][0]
+            preview.command(dict(op="library_save",kind="scenes",id=None,revision=1,value={"name":"White scene","zone_id":zone["id"],"effect":WHITE,"stop_policy":"restore"}))
+            scene=preview.library.snapshot()["scenes"][0]
+            state=preview.command(dict(op="scene_start",request_id="scene",scene_id=scene["id"],library_revision=2,devices=["a","b"]))
+            self.assertEqual(state["targets"]["a"]["target"]["kelvin"],3500)
+        finally: await preview.close()
+
+        class CountingAuthority(Authority):
+            def __init__(self):
+                super().__init__()
+                self.reads=0
+            async def read(self,p):
+                self.reads+=1
+                return await super().read(p)
+        auth=CountingAuthority()
+        clock=[0.]
+        profiles=[ChromaProfile("a","a","white","test","127.0.0.1",1,10001,"yeelight_tcp",None,2700,6500),
+                  ChromaProfile("b","b","synthetic","test","127.0.0.1",0,10002)]
+        runtime=PhysicalRuntime(profiles,auth,enabled=True,clock=lambda:clock[0],transport_factory=lambda p,c:Adapter(p))
+        try:
+            start=dict(op="start",request_id="timeline",zone_id="white",devices=["a","b"],effect=timeline(clip(WHITE,fade_in=1)))
+            with self.assertRaises(ValueError): await runtime.command(start)
+            self.assertEqual(auth.reads,0)
+            self.assertEqual(runtime.manager.snapshots(),())
+            value={**VALUE,"white_points":[{"goal":3000,"command":[255,100,0]},{"goal":4000,"command":[255,200,100]}]}
+            await runtime.command(dict(op="library_save",kind="calibrations",id=None,revision=0,value=value))
+            with self.assertRaises(ValueError):
+                await runtime.command({**start,"effect":timeline(clip(WHITE),clip({**WHITE,"kelvin":4500},start=3))})
+            self.assertEqual(auth.reads,0)
+            state=await runtime.command(start)
+            self.assertEqual(state["targets"]["a"]["target"]["brightness"],0.)
+            self.assertEqual(state["targets"]["a"]["target"]["kelvin"],3500)
+            clock[0]=.5
+            runtime.tick()
+            await runtime.physical.output.drain()
+            self.assertEqual(runtime.state()["targets"]["a"]["target"]["kelvin"],3500)
+            self.assertEqual(runtime.state()["targets"]["a"]["target"]["brightness"],.25)
+            self.assertNotIn("kelvin",runtime.state()["targets"]["b"]["target"])
+            self.assertAlmostEqual(runtime.state()["targets"]["b"]["target"]["green"],(linear_channel(100)+linear_channel(200))/2)
+            session=state["sessions"][0]
+            await runtime.command(dict(op="stop",session_id=session["id"],revision=session["revision"]))
+            self.assertEqual(auth.states,{"a":ORIGINAL,"b":ORIGINAL})
         finally: await runtime.close()

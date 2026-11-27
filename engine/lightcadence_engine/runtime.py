@@ -69,7 +69,7 @@ class PreviewRuntime:
         self.scene_launches = SceneLaunches()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
-        self.manager.target_correction = self.calibrate
+        self.manager.target_correction = lambda d, t: self.calibrate(d, t, allow_dim=True)
         self._calibration_cache = (None, {})
         self.device_bindings = {}
         self.targets = {}
@@ -87,10 +87,12 @@ class PreviewRuntime:
         profiles = self._calibration_cache[1]
         return profiles.get(selector({**binding, "device_id": device})) or profiles.get(selector(binding))
 
-    def calibrate(self, device, target):
+    def calibrate(self, device, target, *, allow_dim=False):
         transport = getattr(self, "device_transports", {}).get(device, {})
         correction = self.correction(device)
         if isinstance(target, KelvinTarget):
+            if not hasattr(self, "device_transports"):
+                return target  # nominal preview, not a device projection
             native_ct = supports_native_white(transport)
             if correction is None:
                 if not native_ct:
@@ -98,7 +100,7 @@ class PreviewRuntime:
                 result = target
             else:
                 result = correction.white_target(target, native_ct)
-            return validate_raw(result, transport)
+            return validate_raw(result, transport, allow_dim=allow_dim)
         if transport.get("white_kelvin") is not None:
             return target
         return target if correction is None else correction.apply(target)
@@ -286,10 +288,11 @@ class PhysicalRuntime(PreviewRuntime):
         self.scene_launches = SceneLaunches()
         self.audio = AudioHub(clock)
         self.manager.audio_provider = self.audio.levels
-        self.manager.target_correction = self.calibrate
+        self.manager.target_correction = lambda d, t: self.calibrate(d, t, allow_dim=True)
         self._calibration_cache = (None, {})
         self.device_bindings = {p.device_id: {"model":p.model,"firmware":p.firmware,"transport":p.transport} for p in profiles}
         self.targets = {}
+        self.physical.white_preflight = self.validate_white_goals
         self._closing = False
         self._manual = {}
         self._ending = {}
@@ -299,6 +302,13 @@ class PhysicalRuntime(PreviewRuntime):
                if p.white_kelvin is not None else
                 {"dual_mode": True, "ct_min_kelvin": p.ct_min_kelvin, "ct_max_kelvin": p.ct_max_kelvin}
                 if p.dual_mode else {})} for p in profiles}
+
+    def validate_white_goals(self, effect, devices):
+        goals = effect.white_goals(devices)
+        if goals and self.library.fault:
+            raise OSError("calibration library unavailable")
+        for device, kelvin in goals:
+            self.calibrate(device, KelvinTarget(1, 1, 1, 1., kelvin), allow_dim=True)
 
     def tick(self):
         if self._closing:

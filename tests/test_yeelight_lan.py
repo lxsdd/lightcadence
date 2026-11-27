@@ -22,7 +22,7 @@ class Discovery(asyncio.DatagramProtocol):
         f.probes.append(data)
         headers = ["HTTP/1.1 200 OK", f"id: {f.lan_id}", "model: synthetic",
                    "fw_ver: 1", f"Location: yeelight://127.0.0.1:{f.tcp_port}",
-                   "support: get_prop set_scene set_power"]
+                   "support: get_prop set_scene set_power set_ct_abx"]
         if f.duplicate:
             headers.append("ID: 0xdead")
         self.transport.sendto(("\r\n".join(headers) + "\r\n\r\n").encode(), addr)
@@ -82,8 +82,8 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     if self.apply:
                         if method == "set_scene":
-                            _, rgb, bright = obj["params"]
-                            self.properties[:4] = ["on", str(bright), str(rgb), "1"]
+                            kind, color, bright = obj["params"]
+                            self.properties[:4] = ["on", str(bright), str(color), "2" if kind == "ct" else "1"]
                         elif method == "set_power":
                             self.properties[0] = obj["params"][0]
                     response = {"id": rid, "result": ["ok"]}
@@ -99,6 +99,84 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
                           1.0, self.tcp_port, "yeelight_tcp")
         return LanBinding(p, self.lan_id, self.tcp_port,
                           self.discovery.get_extra_info("sockname")[1])
+
+    def ct_binding(self):
+        p = ChromaProfile("white", "ha-white", "synthetic", "1", "127.0.0.1",
+                          1., self.tcp_port, "yeelight_tcp", 4000, 2700, 6500)
+        return LanBinding(p, self.lan_id, self.tcp_port,
+                          self.discovery.get_extra_info("sockname")[1])
+
+    async def test_white_output_and_exact_ct_restore(self):
+        self.properties = ["on", "60", "3000", "2", "0", "0"]
+        runtime = compose_lan_candidate([self.ct_binding()], enabled=True, timeout=.5)
+        try:
+            result = await runtime.command({"op": "start", "request_id": "white", "zone_id": "zone",
+                "devices": ["white"], "effect": {"kind": "static", "color": [1,1,1], "brightness": .8}})
+            await runtime.physical.output.drain()
+            self.assertEqual(self.properties[:4], ["on", "80", "4000", "2"])
+            self.assertEqual(self.chroma_messages, [])
+            self.assertIn(("set_scene", ["ct", 4000, 80]), self.commands)
+            session = result["sessions"][0]
+            end = await runtime.command({"op": "stop", "session_id": session["id"],
+                                         "revision": session["revision"]})
+            self.assertEqual(end["sessions"][0]["phase"], "stopped")
+            self.assertEqual(self.properties[:4], ["on", "60", "3000", "2"])
+            self.assertIsNone(runtime.manager.owner("white"))
+        finally:
+            await runtime.close()
+
+    async def test_ct_admission_and_manual_validation_before_detach(self):
+        from engine.lightcadence_engine.sessions import SessionError, DeviceState
+        from engine.lightcadence_engine.effects import LightTarget
+        runtime = compose_lan_candidate([self.ct_binding()], enabled=True, timeout=.5)
+        command = {"op": "start", "request_id": "white", "zone_id": "zone",
+                   "devices": ["white"], "effect": {"kind": "static", "color": [1,1,1]}}
+        try:
+            self.properties = ["on", "60", "2000", "2", "0", "0"]
+            with self.assertRaises(LanStateError):
+                await runtime.command(command)
+            self.assertEqual(runtime.manager.snapshots(), ())
+            self.properties[2] = "3000"
+            result = await runtime.command(command)
+            await runtime.physical.output.drain()
+            owner = result["sessions"][0]["id"]
+            before = len(self.commands)
+            for invalid in (DeviceState(True, LightTarget(1,0,0,.5)),
+                            DeviceState(True, LightTarget(1,1,1,.5), 2000)):
+                with self.assertRaises(SessionError):
+                    await runtime.physical.manual_set("white", invalid)
+            self.assertEqual(runtime.manager.owner("white"), owner)
+            self.assertEqual(len(self.commands), before)
+            self.assertEqual(await runtime.physical.manual_set("white",
+                DeviceState(True, LightTarget(1,1,1,.5), 3500)), "confirmed")
+            self.assertIsNone(runtime.manager.owner("white"))
+            self.assertEqual(self.properties[:4], ["on", "50", "3500", "2"])
+            self.assertEqual(await runtime.physical.manual_off("white"), "confirmed")
+            self.assertEqual(self.properties[:4], ["off", "50", "3500", "2"])
+        finally:
+            await runtime.close()
+
+    async def test_ct_recovery_journal_and_legacy_rgb(self):
+        import tempfile
+        from engine.lightcadence_engine.recovery import RecoveryJournal
+        from engine.lightcadence_engine.sessions import DeviceState, StopPolicy
+        from engine.lightcadence_engine.effects import LightTarget
+        with tempfile.TemporaryDirectory() as directory:
+            keys = {"white": "ct", "rgb": "rgb"}
+            states = {"white": DeviceState(True, LightTarget(1,1,1,.6), 3000),
+                      "rgb": _decode("off", 40, 255)}
+            journal = RecoveryJournal(directory, keys)
+            journal.add(states, StopPolicy.RESTORE)
+            journal.close()
+            journal = RecoveryJournal(directory, keys)
+            try:
+                snapshot = {r["device_id"]: r for r in journal.snapshot()}
+                self.assertEqual(snapshot["white"]["original"]["kelvin"], 3000)
+                self.assertNotIn("kelvin", snapshot["rgb"]["original"])
+                for device, state in states.items():
+                    self.assertEqual(journal.prepare_recovery(device, snapshot[device]["record_id"]), state)
+            finally:
+                journal.close()
 
     async def test_normal_tcp_original_runtime_restore_and_no_udp(self):
         runtime = compose_lan_candidate([self.tcp_binding()], enabled=True, timeout=.5)

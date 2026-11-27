@@ -40,6 +40,12 @@ def parse_start(body):
 
 
 def parse_manual_state(body):
+    if isinstance(body, dict) and "kelvin" in body:
+        fields(body, ("power", "kelvin", "brightness_pct"))
+        bright = body["brightness_pct"]
+        if type(bright) is not int or not 1 <= bright <= 100 or type(body["kelvin"]) is not int:
+            raise ValueError("invalid CT state")
+        return DeviceState(body["power"], LightTarget(1, 1, 1, bright / 100), body["kelvin"])
     if isinstance(body, dict) and "rgb" in body:
         fields(body, ("power", "rgb", "brightness_pct"))
         rgb, bright = body["rgb"], body["brightness_pct"]
@@ -213,7 +219,9 @@ class PhysicalRuntime(PreviewRuntime):
         self._manual = {}
         self._ending = {}
         self.enrolled_devices = tuple(sorted(p.device_id for p in profiles))
-        self.device_transports = {p.device_id: {"kind": p.transport, "interval_seconds": p.interval} for p in profiles}
+        self.device_transports = {p.device_id: {"kind": p.transport, "interval_seconds": p.interval,
+            **({"white_kelvin": p.white_kelvin, "ct_min_kelvin": p.ct_min_kelvin, "ct_max_kelvin": p.ct_max_kelvin}
+               if p.white_kelvin is not None else {})} for p in profiles}
 
     def tick(self):
         if self._closing:

@@ -54,9 +54,9 @@ class RecoveryJournal:
             raise ValueError("invalid recovery record")
         StopPolicy(record["policy"])
         state = record["original"]
-        if not isinstance(state, dict) or set(state) != {"power", "target"} or not isinstance(state["target"], dict):
+        if not isinstance(state, dict) or set(state) not in ({"power", "target"}, {"power", "target", "kelvin"}) or not isinstance(state["target"], dict):
             raise ValueError("invalid original state")
-        return DeviceState(state["power"], LightTarget(**state["target"]))
+        return DeviceState(state["power"], LightTarget(**state["target"]), state.get("kelvin"))
 
     def require_healthy(self):
         if self.fault or self._lock is None:
@@ -96,8 +96,11 @@ class RecoveryJournal:
             raise ValueError("device already recorded")
         records = dict(self.records)
         for device, state in originals.items():
+            original = asdict(state)
+            if state.kelvin is None:
+                original.pop("kelvin")
             records[device] = {"id": uuid4().hex, "binding": self.keys[device],
-                               "original": asdict(state), "policy": policy.value}
+                               "original": original, "policy": policy.value}
         self._save(records)
 
     def remove(self, devices):

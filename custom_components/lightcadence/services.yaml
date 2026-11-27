@@ -24,9 +24,40 @@ set_rgb:
           step: 1
           unit_of_measurement: "%"
           mode: slider
+set_ct:
+  name: Set colour temperature and turn on
+  description: Cooperatively release one enrolled white-light lamp and apply its exact Kelvin and brightness state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+    kelvin:
+      name: Colour temperature
+      required: true
+      selector:
+        number:
+          min: 1700
+          max: 6500
+          step: 1
+          unit_of_measurement: K
+          mode: box
+    brightness_pct:
+      name: Brightness
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
 turn_on:
   name: Turn on enrolled lamp
-  description: Release one enrolled lamp from its show and turn it on with its fresh RGB state.
+  description: Release one enrolled lamp from its show and turn it on with its fresh supported state.
   fields:
     entity_id:
       name: Light entity
@@ -37,7 +68,7 @@ turn_on:
             domain: light
 turn_off:
   name: Turn off enrolled lamp
-  description: Release one enrolled lamp from its show and turn it off preserving its fresh RGB state.
+  description: Release one enrolled lamp from its show and turn it off preserving its fresh supported state.
   fields:
     entity_id:
       name: Light entity

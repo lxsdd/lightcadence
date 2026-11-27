@@ -7,12 +7,12 @@ import type {Track,Timing} from "./timeline";
 import type {Plan,SpatialPath} from "./floorplan";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
-type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; transport?: {kind:string;interval_seconds:number}|null; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
+type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; transport?: {kind:string;interval_seconds:number;white_kelvin?:number;ct_min_kelvin?:number;ct_max_kelvin?:number}|null; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
 type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
 type MixState={master:number;groups:{gain:number;muted:boolean;solo:boolean}[]};
 type Session = {scene_origin?:{scene_id:string;scene_revision:number;scene_name:string};mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
 type RGB = {red: number; green: number; blue: number; brightness: number};
-type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB}; policy:string; binding_matches:boolean};
+type Recovery = {device_id:string; record_id:string; original:{power:boolean;target:RGB;kelvin?:number}; policy:string; binding_matches:boolean};
 type AudioSource = {id:string;name:string;status:"waiting"|"live"|"lost";bands:number[]|null;bpm:number|null;beat_count:number;kind?:string;clock_mapping?:string;read_to_engine_seconds?:number|null;transport_jitter_seconds?:number|null};
 type LeafEffect={kind:string;period_seconds:number;brightness:number;color:number[];width:number};
 type Layer={effect:LeafEffect;opacity:number;blend:"over"|"add"|"max";devices?:string[]};
@@ -26,7 +26,7 @@ type LibraryCommand={op:"library_save"|"library_delete";instance_id:string;revis
 type Snapshot = {library?:Library;audio_sources?:AudioSource[];recovery_required?:Recovery[]; recovery_journal_fault?:boolean; schema_version: 1; instance_id: string; output_mode: "preview" | "physical_candidate"; physical_output_enabled: boolean; hardware_qualified?: boolean; enrolled_devices?: string[]; manual_result?: "confirmed" | "unconfirmed"; sessions: Session[]; targets: Record<string, {target: RGB}>};
 type StopPolicy = "restore" | "hold" | "off";
 type Start = {stop_policy?: StopPolicy; instance_id?: string; op: "start"; request_id: string; zone_id: string; devices: string[]; positions?:Record<string,number>; effect: Timing & {kind: string; period_seconds: number; brightness: number; color?:number[];width?:number;audio_source?:string;layers?:Layer[];tracks?:Track[];loop?:boolean;auto_end?:boolean}};
-type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; rgb: number[]; brightness_pct: number}} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
+type Manual = {instance_id: string; op: "manual_set"; request_id: string; device_id: string; state: {power: true; brightness_pct: number} & ({rgb:number[]}|{kelvin:number})} | {instance_id: string; op: "manual_off"; request_id: string; device_id: string};
 type TimelineControl={op:"timeline_control";instance_id:string;session_id:string;revision:number;action:"pause"|"resume"|"seek";position?:number};
 type MixControl={op:"mix_control";instance_id:string;session_id:string;revision:number;action:"master"|"gain"|"mute"|"solo";value:number|boolean;index?:number};
 type Command = MixControl | TimelineControl | LibraryCommand | Start | Manual | {op:"recover";instance_id:string;device_id:string;record_id:string;decision:"keep"|"restore"} | {instance_id?: string; op: "stop" | "detach"; session_id: string; revision: number; device_id?: string};
@@ -60,7 +60,7 @@ class LightCadencePanel extends LitElement {
     hass:{attribute:false}, catalog:{state:true}, snapshot:{state:true}, chosen:{state:true},
     zone:{state:true}, effect:{state:true},layers:{state:true}, tracks:{state:true},timing:{state:true},timelineLoop:{state:true},timelineAutoEnd:{state:true}, audioSource:{state:true}, selectedZone:{state:true},spatialPath:{state:true},floorplanOpen:{state:true},selectedScene:{state:true},sceneName:{state:true}, period:{state:true}, brightness:{state:true},
     busy:{state:true}, status:{state:true}, online:{state:true}, stopPolicy:{state:true},
-    nativeScenes:{state:true},nativeSelected:{state:true},nativeInspection:{state:true},nativeName:{state:true},manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, pendingManual:{state:true},
+    nativeScenes:{state:true},nativeSelected:{state:true},nativeInspection:{state:true},nativeName:{state:true},manualDevice:{state:true}, manualColor:{state:true}, manualBrightness:{state:true}, manualKelvin:{state:true}, pendingManual:{state:true},
   };
   declare nativeScenes:NativeScene[];
   declare nativeSelected:string;
@@ -99,12 +99,13 @@ class LightCadencePanel extends LitElement {
   declare manualDevice: string;
   declare manualColor: string;
   declare manualBrightness: number;
+  declare manualKelvin: number;
   declare pendingManual?: Manual;
   private entry?: string;
   private refreshing = false;
   constructor() {
     super(); this.nativeScenes=[];this.nativeSelected="";this.nativeName="";this.chosen=[]; this.zone=""; this.effect="rainbow"; this.layers=[];this.tracks=[];this.timing={};this.timelineLoop=true;this.timelineAutoEnd=false; this.audioSource=""; this.selectedZone="";this.spatialPath="";this.floorplanOpen=false;this.selectedScene="";this.sceneName=""; this.period=4;
-    this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
+    this.brightness=1; this.stopPolicy="restore"; this.manualDevice=""; this.manualColor="#ffffff"; this.manualBrightness=50; this.manualKelvin=4000; this.busy=false; this.status="Connecting to local engine…"; this.online=false;
   }
   connectedCallback() {
     super.connectedCallback(); this.epoch++;
@@ -120,6 +121,7 @@ class LightCadencePanel extends LitElement {
   }
   private accept(s: Snapshot) {
     const physical=this.catalog?.physical_output_enabled===true;
+    const white=this.catalog?.lights.find(l=>l.id===this.manualDevice)?.transport;
     if(s.schema_version!==1 || s.output_mode!==(physical?"physical_candidate":"preview") || s.physical_output_enabled!==physical || (physical && (s.hardware_qualified!==false || !Array.isArray(s.enrolled_devices)))) throw new Error("incompatible engine API");
     if(this.snapshot && this.snapshot.instance_id!==s.instance_id) {this.pendingStart=undefined;this.pendingManual=undefined;this.nativeInspection=undefined;this.nativeFence=undefined;}
     this.snapshot=s;
@@ -317,9 +319,16 @@ class LightCadencePanel extends LitElement {
     const common={instance_id:this.snapshot.instance_id,request_id:requestId(),device_id:this.manualDevice};
     if(off) this.pendingManual={...common,op:"manual_off"};
     else {
-      if(!/^#[0-9a-f]{6}$/i.test(this.manualColor) || !Number.isInteger(this.manualBrightness) || this.manualBrightness<1 || this.manualBrightness>100) return;
-      const rgb=[1,3,5].map(i=>parseInt(this.manualColor.slice(i,i+2),16));
-      this.pendingManual={...common,op:"manual_set",state:{power:true,rgb,brightness_pct:this.manualBrightness}};
+      if(!Number.isInteger(this.manualBrightness) || this.manualBrightness<1 || this.manualBrightness>100) return;
+      const transport=this.catalog.lights.find(l=>l.id===this.manualDevice)?.transport;
+      if(transport?.white_kelvin!==undefined) {
+        if(!Number.isInteger(this.manualKelvin)||this.manualKelvin<(transport.ct_min_kelvin??1700)||this.manualKelvin>(transport.ct_max_kelvin??6500)) return;
+        this.pendingManual={...common,op:"manual_set",state:{power:true,kelvin:this.manualKelvin,brightness_pct:this.manualBrightness}};
+      } else {
+        if(!/^#[0-9a-f]{6}$/i.test(this.manualColor)) return;
+        const rgb=[1,3,5].map(i=>parseInt(this.manualColor.slice(i,i+2),16));
+        this.pendingManual={...common,op:"manual_set",state:{power:true,rgb,brightness_pct:this.manualBrightness}};
+      }
     }
     void this.send(this.pendingManual);
   }
@@ -375,7 +384,7 @@ class LightCadencePanel extends LitElement {
             ${paths.length?html`<label>Spatial effect path <select aria-label="Spatial effect path" .value=${this.spatialPath} ?disabled=${formLocked} @change=${(e:Event)=>this.spatialPath=(e.target as HTMLSelectElement).value}><option value="">Ordered lamps</option>${paths.map(p=>html`<option value=${p.floorplan_id+"/"+p.path_id} ?disabled=${!p.positions}>${p.name}${p.positions?"":" · missing placements"}</option>`)}</select></label>`:nothing}
             ${(this.effect==="timeline"||this.effect==="layered")&&!this.validTargetMasks(this.chosen)?html`<p role="alert">Every selected lamp must be targeted by a layer or nonempty track. Remove targets outside this selection.</p>`:nothing}
             <h3>Lamps · ${this.chosen.length} selected</h3>
-            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||blocked.has(l.id)||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${blocked.has(l.id)?"Recovery required":locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small>${l.transport?html`<small>${l.transport.kind==="yeelight_tcp"?"Normal Yeelight TCP":"Chroma V2 UDP"} · ${l.transport.interval_seconds}s cadence</small>`:nothing}</span></label>`):html`<p>No registered lights available.</p>`}
+            ${this.catalog?.lights.length?this.catalog.lights.map(l=>html`<label class="lamp"><input type="checkbox" .checked=${this.chosen.includes(l.id)} ?disabled=${formLocked||blocked.has(l.id)||(locked.has(l.id)&&!this.chosen.includes(l.id))} @change=${(e:Event)=>this.toggle(l.id,(e.target as HTMLInputElement).checked)}><span>${l.name}<small>${l.entity_id} · ${blocked.has(l.id)?"Recovery required":locked.has(l.id)?(physical?"In show":"In preview"):l.available?"Available":"Unavailable in HA"}</small><small>${observationLabel(l)}</small>${l.transport?html`<small>${l.transport.kind==="yeelight_tcp"?"Normal Yeelight TCP":"Chroma V2 UDP"} · ${l.transport.interval_seconds}s cadence${l.transport.white_kelvin!==undefined?` · White only ${l.transport.white_kelvin} K`:""}</small>`:nothing}</span></label>`):html`<p>No registered lights available.</p>`}
             <button class="primary" ?disabled=${!this.online||this.busy||fault||this.chosen.some(id=>blocked.has(id))||(!this.pendingStart&&(!this.zone.trim()||!this.chosen.length||this.chosen.some(id=>locked.has(id))||!(this.period>0)||(this.needsAudio()&&!sources.some(s=>s.id===this.audioSource))||(this.effect==="layered"&&!this.validLayers())||(this.effect==="timeline"&&!this.validTimeline())))} @click=${()=>this.start()}>${this.pendingStart?"Retry same start":physical?"Start hardware test":"Start preview"}</button>
             ${this.pendingStart&&!this.busy?html`<button @click=${()=>{this.pendingStart=undefined;this.status="Start retry cleared; refresh server state before a new start.";void this.refresh(true);this.requestUpdate();}}>Clear retry</button>`:nothing}
           </section>
@@ -409,12 +418,12 @@ class LightCadencePanel extends LitElement {
           </article>`):html`<p>${physical?"No active shows. Choose enrolled lamps and an effect to begin.":"No active previews. Choose lamps and an effect to begin."}</p>`}
           </section>
         ${sources.length||this.needsAudio()?html`<section aria-labelledby="audio"><h2 id="audio">Audio analysis</h2><p>Local PCM · playback synchronization unverified</p>${sources.length?sources.map(s=>html`<article><h3>${s.name}</h3><p>${s.status==="live"?"Live":s.status==="lost"?"Source lost — fading to ambient":"Waiting for PCM"} · BPM ${s.bpm??"—"} · ${s.beat_count} onsets</p><p>${s.kind==="pulse_monitor"?"Digital monitor":s.kind==="pulse_microphone"?"Microphone":"PCM input"} · ${s.clock_mapping==="local_read_monotonic"?"Local read clock":"Arrival clock only"}${s.read_to_engine_seconds!=null?html` · Read-to-engine ${Math.round(s.read_to_engine_seconds*1000)} ms`:nothing}${s.transport_jitter_seconds!=null?html` · Transport jitter ${Math.round(s.transport_jitter_seconds*1000)} ms`:nothing}</p>${s.bands?.map((v,i)=>html`<label>${["Bass","Mid","Treble"][i]} <meter min="0" max="1" .value=${v}>${Math.round(v*100)}%</meter></label>`)}</article>`):html`<p>No local audio source connected.</p>`}</section>`:nothing}
-        ${physical&&(fault||recovery.length)?html`<section aria-labelledby="recovery"><h2 id="recovery">Recovery required</h2><p>Interrupted shows are never restarted automatically. Check the actual lamp before choosing to keep its current state or explicitly restore its recorded original state. Restoring may overwrite changes made outside LightCadence.</p>${fault?html`<p role="alert">Journal unavailable. New starts and manual actions are blocked. Inspect local storage and restart safely.</p>`:nothing}${recovery.map(r=>html`<article><h3>${this.name(r.device_id)}</h3><p>Recorded: ${r.original.power?"On":"Off"} · ${Math.round(r.original.target.brightness*100)}% · ${r.policy}</p><p>${r.binding_matches?"Identity will be rechecked":"Binding changed — recovery blocked"}</p>${(["keep","restore"] as const).map(decision=>html`<button ?disabled=${!this.online||this.busy||fault||!r.binding_matches||!this.catalog?.lights.some(l=>l.id===r.device_id)} @click=${()=>this.snapshot&&this.send({op:"recover",instance_id:this.snapshot.instance_id,device_id:r.device_id,record_id:r.record_id,decision})}>${decision==="keep"?"Keep current state":"Restore recorded state"}</button> `)}</article>`)}</section>`:nothing}
+        ${physical&&(fault||recovery.length)?html`<section aria-labelledby="recovery"><h2 id="recovery">Recovery required</h2><p>Interrupted shows are never restarted automatically. Check the actual lamp before choosing to keep its current state or explicitly restore its recorded original state. Restoring may overwrite changes made outside LightCadence.</p>${fault?html`<p role="alert">Journal unavailable. New starts and manual actions are blocked. Inspect local storage and restart safely.</p>`:nothing}${recovery.map(r=>html`<article><h3>${this.name(r.device_id)}</h3><p>Recorded: ${r.original.power?"On":"Off"} · ${Math.round(r.original.target.brightness*100)}%${r.original.kelvin!==undefined?` · ${r.original.kelvin} K`:""} · ${r.policy}</p><p>${r.binding_matches?"Identity will be rechecked":"Binding changed — recovery blocked"}</p>${(["keep","restore"] as const).map(decision=>html`<button ?disabled=${!this.online||this.busy||fault||!r.binding_matches||!this.catalog?.lights.some(l=>l.id===r.device_id)} @click=${()=>this.snapshot&&this.send({op:"recover",instance_id:this.snapshot.instance_id,device_id:r.device_id,record_id:r.record_id,decision})}>${decision==="keep"?"Keep current state":"Restore recorded state"}</button> `)}</article>`)}</section>`:nothing}
         ${physical?html`<section class="manual" aria-labelledby="manual"><h2 id="manual">Manual lamp control</h2><p>Take the selected lamp out of any running show before changing it. Other lamps continue. No automatic retry after an uncertain result.</p>
-          <label>Manual lamp <select aria-label="Manual lamp" .value=${this.manualDevice} ?disabled=${this.busy||!!this.pendingManual} @change=${(e:Event)=>this.manualDevice=(e.target as HTMLSelectElement).value}><option value="">Select a lamp</option>${this.catalog?.lights.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
-          <label>Manual colour <input aria-label="Manual colour" type="color" .value=${this.manualColor} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualColor=(e.target as HTMLInputElement).value}></label>
+          <label>Manual lamp <select aria-label="Manual lamp" .value=${this.manualDevice} ?disabled=${this.busy||!!this.pendingManual} @change=${(e:Event)=>{this.manualDevice=(e.target as HTMLSelectElement).value;this.manualKelvin=this.catalog?.lights.find(l=>l.id===this.manualDevice)?.transport?.white_kelvin??4000;}}><option value="">Select a lamp</option>${this.catalog?.lights.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
+          ${white?.white_kelvin!==undefined?html`<label>Manual temperature (K) <input aria-label="Manual temperature (K)" type="number" min=${white.ct_min_kelvin??1700} max=${white.ct_max_kelvin??6500} step="1" .value=${String(this.manualKelvin)} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualKelvin=(e.target as HTMLInputElement).valueAsNumber}></label>`:html`<label>Manual colour <input aria-label="Manual colour" type="color" .value=${this.manualColor} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualColor=(e.target as HTMLInputElement).value}></label>`}
           <label>Manual brightness (%) <input aria-label="Manual brightness (%)" type="number" min="1" max="100" step="1" .value=${String(this.manualBrightness)} ?disabled=${this.busy||!!this.pendingManual} @input=${(e:Event)=>this.manualBrightness=(e.target as HTMLInputElement).valueAsNumber}></label>
-          ${this.pendingManual?html`<button ?disabled=${!this.online||this.busy} @click=${()=>this.manual(false)}>Check same manual request</button><button ?disabled=${this.busy} @click=${()=>{this.pendingManual=undefined;this.status="Manual outcome may be uncertain. Inspect the device before a new action.";}}>Clear pending request</button>`:html`<button ?disabled=${!this.online||this.busy||fault||blocked.has(this.manualDevice)||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(false)}>Apply colour and turn on</button> <button ?disabled=${!this.online||this.busy||fault||blocked.has(this.manualDevice)||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(true)}>Turn off lamp</button>`}
+          ${this.pendingManual?html`<button ?disabled=${!this.online||this.busy} @click=${()=>this.manual(false)}>Check same manual request</button><button ?disabled=${this.busy} @click=${()=>{this.pendingManual=undefined;this.status="Manual outcome may be uncertain. Inspect the device before a new action.";}}>Clear pending request</button>`:html`<button ?disabled=${!this.online||this.busy||fault||blocked.has(this.manualDevice)||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(false)}>${white?.white_kelvin!==undefined?"Apply temperature and turn on":"Apply colour and turn on"}</button> <button ?disabled=${!this.online||this.busy||fault||blocked.has(this.manualDevice)||!this.manualDevice||!!this.pendingStart} @click=${()=>this.manual(true)}>Turn off lamp</button>`}
         </section>`:nothing}
         </div>
         </div>

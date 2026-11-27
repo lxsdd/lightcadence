@@ -21,6 +21,12 @@ def _brightness(value):
     return value
 
 
+def _kelvin(value):
+    if type(value) is not int or not 1700 <= value <= 6500:
+        raise vol.Invalid("integer color temperature 1700–6500 K required")
+    return value
+
+
 def register_actions(hass):
     # A single explicit entity reference, no group/area expansion or automatic
     # fallback to another light service. Only a configured physical engine can act.
@@ -28,6 +34,10 @@ def register_actions(hass):
     color_schema = vol.Schema({vol.Required("entity_id"): str,
                                vol.Required("rgb_color"): _rgb,
                                vol.Required("brightness_pct"): _brightness})
+
+    ct_schema = vol.Schema({vol.Required("entity_id"): str,
+                            vol.Required("kelvin"): _kelvin,
+                            vol.Required("brightness_pct"): _brightness})
 
     async def authorized_client(call):
         # Direct user actions require admin. HA-owned automations run with a
@@ -57,12 +67,15 @@ def register_actions(hass):
                 raise ServiceValidationError("Light is not enrolled in the physical engine")
             # Do not auto-retry across HTTP failure or restart. The engine instance
             # fences this command, and its original manual reservation owns the I/O.
-            payload = {"op": {"set_rgb": "manual_set", "turn_on": "manual_on",
+            payload = {"op": {"set_rgb": "manual_set", "set_ct": "manual_set", "turn_on": "manual_on",
                               "turn_off": "manual_off"}[call.service],
                        "request_id": str(uuid4()), "instance_id": state["instance_id"],
                        "device_id": device}
             if call.service == "set_rgb":
                 payload["state"] = {"power": True, "rgb": call.data["rgb_color"],
+                                    "brightness_pct": call.data["brightness_pct"]}
+            if call.service == "set_ct":
+                payload["state"] = {"power": True, "kelvin": call.data["kelvin"],
                                     "brightness_pct": call.data["brightness_pct"]}
             result = await client.physical_command(payload)
         except EngineError as exc:
@@ -125,5 +138,5 @@ def register_actions(hass):
     hass.services.async_register(DOMAIN, "start_scene", scene_action, schema=scene_schema)
     hass.services.async_register(DOMAIN, "stop_scene", scene_action, schema=vol.Schema({vol.Required("scene_id"): str}))
 
-    for service, schema in (("set_rgb", color_schema), ("turn_on", power_schema), ("turn_off", power_schema)):
+    for service, schema in (("set_rgb", color_schema), ("set_ct", ct_schema), ("turn_on", power_schema), ("turn_off", power_schema)):
         hass.services.async_register(DOMAIN, service, action, schema=schema)

@@ -28,6 +28,9 @@ class ChromaProfile:
     interval: float
     port: int = 55444
     transport: str = "chroma_v2"
+    white_kelvin: int | None = None
+    ct_min_kelvin: int | None = None
+    ct_max_kelvin: int | None = None
 
     def __post_init__(self):
         if any(not isinstance(x, str) or not x.strip() for x in
@@ -40,6 +43,11 @@ class ChromaProfile:
             raise ValueError("explicit supported local transport required")
         if self.transport == "yeelight_tcp" and self.interval < 1.0:
             raise ValueError("normal Yeelight TCP requires at least one second between frame attempts")
+        ct = (self.ct_min_kelvin, self.white_kelvin, self.ct_max_kelvin)
+        if any(v is not None for v in ct):
+            if (self.transport != "yeelight_tcp" or not all(type(v) is int for v in ct)
+                    or not 1700 <= ct[0] <= ct[1] <= ct[2] <= 6500):
+                raise ValueError("explicit normal TCP white-light temperature and range required")
         # Reuse original endpoint validation; constructing an adapter opens no socket.
         ChromaV2Adapter(self.device_id, self.host, self.port)
 
@@ -79,9 +87,17 @@ class ProfiledChroma:
         if (not isinstance(value, Observation)
                 or (value.device_id, value.ha_registry_id, value.model, value.firmware)
                 != (p.device_id, p.ha_registry_id, p.model, p.firmware)
-                or value.mode != "rgb" or not isinstance(value.state, DeviceState)):
-            raise SessionError("state identity or supported complete RGB snapshot unavailable")
+                or value.mode != ("ct" if p.white_kelvin is not None else "rgb")
+                or not isinstance(value.state, DeviceState)
+                or not self.supports_state(value.state)):
+            raise SessionError("state identity or supported complete snapshot unavailable")
         return value.state
+
+    def supports_state(self, state):
+        p = self.profile
+        if p.white_kelvin is None:
+            return state.kelvin is None
+        return state.kelvin is not None and p.ct_min_kelvin <= state.kelvin <= p.ct_max_kelvin
 
     async def send_frame(self, frame):
         await self.transport.send_frame(frame)
@@ -240,8 +256,10 @@ class PhysicalSessions:
         """One cooperating manual write, confirmed by independent observation."""
         if not isinstance(state, DeviceState):
             raise SessionError("invalid manual state")
+        adapter = self._adapters.get(device_id)
+        if adapter is None or not adapter.supports_state(state):
+            raise SessionError("manual state not supported by enrolled profile")
         async with self.manual_handover(device_id):
-            adapter = self._adapters[device_id]
             await adapter.observe()
             return await self._confirmed_write(adapter, state)
 
@@ -258,7 +276,7 @@ class PhysicalSessions:
         async with self.manual_handover(device_id):
             adapter = self._adapters[device_id]
             current = await adapter.observe()
-            return await self._confirmed_write(adapter, DeviceState(power, current.target))
+            return await self._confirmed_write(adapter, DeviceState(power, current.target, current.kelvin))
 
     async def manual_off(self, device_id):
         return await self.manual_power(device_id, False)

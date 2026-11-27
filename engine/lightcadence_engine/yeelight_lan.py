@@ -54,9 +54,28 @@ def _decode(power, brightness, rgb):
         linear_channel(rgb >> 16), linear_channel(rgb >> 8 & 255), linear_channel(rgb & 255), brightness / 100))
 
 
+def _decode_ct(power, brightness, kelvin, profile):
+    if (power not in ("on", "off") or not 1 <= brightness <= 100
+            or not profile.ct_min_kelvin <= kelvin <= profile.ct_max_kelvin):
+        raise LanStateError("invalid CT state")
+    return DeviceState(power == "on", LightTarget(1, 1, 1, brightness / 100), kelvin)
+
+
+def _state_parameters(state, profile):
+    if profile.white_kelvin is None:
+        rgb, bright = _encode(state)
+        return ["color", rgb, bright]
+    if not isinstance(state, DeviceState) or state.kelvin is None:
+        raise ValueError("explicit CT state required")
+    bright = round(state.target.brightness * 100)
+    if _decode_ct("on" if state.power else "off", bright, state.kelvin, profile) != state:
+        raise ValueError("CT state not exactly representable")
+    return ["ct", state.kelvin, bright]
+
+
 def _encode(state):
-    if not isinstance(state, DeviceState):
-        raise ValueError("invalid state")
+    if not isinstance(state, DeviceState) or state.kelvin is not None:
+        raise ValueError("invalid RGB state")
     t = state.target
     rgb = 0
     for channel in (t.red, t.green, t.blue):
@@ -88,7 +107,8 @@ def _capabilities(raw, binding):
         if (headers["id"].lower() != binding.lan_id.lower()
                 or headers["model"] != p.model or headers["fw_ver"] != p.firmware
                 or headers["location"] != f"yeelight://{p.host}:{binding.tcp_port}"
-                or not {"get_prop", "set_scene", "set_power"} <= set(headers["support"].split())):
+                or not ({"get_prop", "set_scene", "set_power"} |
+                        ({"set_ct_abx"} if p.white_kelvin is not None else set())) <= set(headers["support"].split())):
             raise ValueError
     except (KeyError, ValueError, UnicodeError):
         raise LanStateError("discovery identity or capabilities mismatch") from None
@@ -121,16 +141,20 @@ class _Connection:
                 raise LanStateError("LAN request rejected or response uncorrelated")
             return obj["result"]
 
-    async def state(self):
-        result = await self.call("get_prop", _PROPERTIES)
-        if len(result) != len(_PROPERTIES) or not all(isinstance(v, str) for v in result):
-            raise LanStateError("incomplete LAN RGB state")
-        power, bright, rgb, mode, flowing, music = result
-        if mode != "1" or flowing != "0" or music != "0":
+    async def state(self, profile):
+        ct = profile.white_kelvin is not None
+        properties = ["power", "bright", "ct", "color_mode", "flowing", "music_on"] if ct else _PROPERTIES
+        result = await self.call("get_prop", properties)
+        if len(result) != len(properties) or not all(isinstance(v, str) for v in result):
+            raise LanStateError("incomplete LAN state")
+        power, bright, color, mode, flowing, music = result
+        if mode != ("2" if ct else "1") or flowing != "0" or music != "0":
             raise LanStateError("unsupported or active external device mode")
-        if not re.fullmatch(r"[0-9]{1,3}", bright) or not re.fullmatch(r"[0-9]{1,8}", rgb):
-            raise LanStateError("invalid RGB state")
-        return _decode(power, int(bright), int(rgb))
+        if not re.fullmatch(r"[0-9]{1,3}", bright) or not re.fullmatch(r"[0-9]{1,8}", color):
+            raise LanStateError("invalid LAN state")
+        if ct:
+            return _decode_ct(power, int(bright), int(color), profile)
+        return _decode(power, int(bright), int(color))
 
     async def apply(self, method, params):
         if await self.call(method, params) != ["ok"]:
@@ -196,22 +220,22 @@ class YeelightLanStatePort:
 
     async def read(self, profile):
         async with self._transaction(profile) as conn:
-            state = await conn.state()
+            state = await conn.state(profile)
         return Observation(profile.device_id, profile.ha_registry_id, profile.model,
-                           profile.firmware, "rgb", state)
+                           profile.firmware, "ct" if state.kelvin is not None else "rgb", state)
 
     async def write(self, profile, state):
         # Reject unsupported/quantized manual targets without touching the device.
-        rgb, bright = _encode(state)
+        params = _state_parameters(state, profile)
         async with self._transaction(profile) as conn:
-            current = await conn.state()
+            current = await conn.state(profile)
             if current == state:
                 return True
             if not state.power and not current.power:
                 # Do not flash an already-off lamp to change hidden attributes.
                 return False
-            if state.power or current.target != state.target:
-                await conn.apply("set_scene", ["color", rgb, bright])
+            if state.power or current.target != state.target or current.kelvin != state.kelvin:
+                await conn.apply("set_scene", params)
             if not state.power:
                 await conn.apply("set_power", ["off", "sudden", 0])
             return True
@@ -265,8 +289,16 @@ class YeelightTcpOutput:
         await self.maintain()
         if frame.device_id != self.profile.device_id:
             raise LanStateError("frame does not match enrolled device")
-        params = scene_parameters(frame.target)[:3]
-        if params == self.last:
+        if self.profile.white_kelvin is None:
+            method, params = "set_scene", scene_parameters(frame.target)[:3]
+        else:
+            # Project linear RGB intensity onto a white-only channel. No invented RGB capability.
+            t = frame.target
+            level = round(100 * t.brightness * (.2126*t.red + .7152*t.green + .0722*t.blue))
+            method, params = (("set_scene", ["ct", self.profile.white_kelvin, level]) if level
+                              else ("set_power", ["off", "sudden", 0]))
+        command = (method, params)
+        if command == self.last:
             return
         now = self.clock()
         while self.attempts and now - self.attempts[0] >= 60.0:
@@ -276,12 +308,12 @@ class YeelightTcpOutput:
         self.attempts.append(now)
         try:
             async with asyncio.timeout(self.authority._timeout):
-                await self.connection.apply("set_scene", params)
+                await self.connection.apply(method, params)
         except BaseException:
             # A failed/uncertain command is never replayed or reconnected.
             self.close()
             raise
-        self.last = params
+        self.last = command
 
 
 def compose_lan_candidate(bindings, *, enabled=False, timeout=2.0, journal=None):

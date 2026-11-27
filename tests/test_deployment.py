@@ -50,6 +50,20 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 configured_runtime(self.env)
 
+    async def test_white_profile_explicit_range_and_transport(self):
+        white = {**self.device, "transport": "yeelight_tcp", "interval": 1.,
+                 "white_kelvin": 4000, "ct_min_kelvin": 2700, "ct_max_kelvin": 6500}
+        self.save({**self.document, "devices": [white]})
+        with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+            runtime = configured_runtime(self.env)
+            self.assertEqual(runtime.state()["device_transports"]["synthetic"]["white_kelvin"], 4000)
+            await runtime.close()
+        for changes in ({"white_kelvin": 2000}, {"ct_min_kelvin": None},
+                        {"white_kelvin": True}, {"transport": "chroma_v2"}):
+            self.save({**self.document, "devices": [{**white, **changes}]})
+            with self.assertRaises(ValueError):
+                configured_runtime(self.env)
+
     async def test_invalid_local_documents_fail_closed(self):
         for doc in ({**self.document, "owner_hardware_test": False},
                     {**self.document, "schema_version": True},

@@ -45,10 +45,15 @@ class StopPolicy(StrEnum):
 class DeviceState:
     power: bool
     target: LightTarget
+    kelvin: int | None = None
 
     def __post_init__(self):
         if type(self.power) is not bool or not isinstance(self.target, LightTarget):
             raise ValueError("invalid device snapshot")
+        if self.kelvin is not None and (type(self.kelvin) is not int or not 1700 <= self.kelvin <= 6500
+                or (self.target.red, self.target.green, self.target.blue) != (1, 1, 1)
+                or not 0.01 <= self.target.brightness <= 1):
+            raise ValueError("invalid color temperature snapshot")
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,7 +395,7 @@ class SessionManager:
                 continue
             original = session.originals[device]
             target = original if session.policy is StopPolicy.RESTORE else DeviceState(
-                False, original.target)
+                False, original.target, original.kelvin)
             session.pending_stop[device] = StopIntent(
                 session.id, session.generation, device, target)
         return tuple(session.pending_stop.values())

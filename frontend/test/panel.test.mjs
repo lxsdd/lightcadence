@@ -86,10 +86,10 @@ try {
       await customElements.whenDefined("lightcadence-panel");
       const el=document.querySelector("lightcadence-panel");
       window.physicalCalls=[];
-      const s={schema_version:1,instance_id:"physical-instance",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a"],sessions:[],targets:{}};
+      const s={schema_version:1,instance_id:"physical-instance",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a","missing"],sessions:[],targets:{}};
       el.hass={callWS:async msg=>{
         window.physicalCalls.push(structuredClone(msg));
-        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,enrollment:[{id:"a",entity_id:"light.a",name:"Lamp A",status:"registered",shared_ha_device:false,observation:{source:"ha_cache",status:"cached_kelvin",power:true,color_mode:"color_temp",rgb:null,brightness:100,kelvin:3200}},{id:"missing",entity_id:null,name:null,status:"missing_registry",shared_ha_device:false,observation:null}],lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
         if(msg.type==="lightcadence/physical" && msg.payload.op==="start")s.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];
         if(msg.type==="lightcadence/physical" && msg.payload.op==="stop")s.sessions=[];
         if(msg.type==="lightcadence/physical" && ["manual_set","manual_off"].includes(msg.payload.op)){
@@ -99,6 +99,11 @@ try {
       }};
     });
     await page.getByText("Hardware test workspace",{exact:true}).waitFor();
+    await page.getByText("Enrollment diagnostics · 2 enrolled · 1 need review",{exact:true}).click();
+    await page.getByText("missing · Missing registry entry",{exact:true}).waitFor();
+    await page.getByText("On · Kelvin cached · 3200 K (HA cache, not device feedback)",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.physicalCalls.filter(x=>x.payload).length),0);
+    await page.getByText("Enrollment diagnostics · 2 enrolled · 1 need review",{exact:true}).click();
     await page.getByRole("textbox",{name:"Zone name"}).fill("Test zone");
     await page.getByRole("checkbox").check();
     await page.getByLabel("Stop behaviour").selectOption("hold");

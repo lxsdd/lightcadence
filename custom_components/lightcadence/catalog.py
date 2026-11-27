@@ -3,6 +3,8 @@
 Do not infer physical identity, LAN credentials, or transport readiness from
 an entity registry entry. Multi-channel devices and groups need later mapping.
 """
+from math import isfinite
+
 from homeassistant.helpers import entity_registry as er
 
 
@@ -23,9 +25,19 @@ def cached_light_state(state):
     rgb_valid = (isinstance(rgb, (list, tuple)) and len(rgb) == 3
                  and all(type(x) is int and 0 <= x <= 255 for x in rgb))
     brightness_valid = type(brightness) is int and 1 <= brightness <= 255
+    kelvin = attrs.get("color_temp_kelvin")
+    kelvin_valid = type(kelvin) is int and kelvin > 0
+    hs = attrs.get("hs_color")
+    hs_valid = (isinstance(hs, (list, tuple)) and len(hs) == 2
+                and all(type(v) in (int, float) and isfinite(v) for v in hs)
+                and 0 <= hs[0] <= 360 and 0 <= hs[1] <= 100)
     effect = attrs.get("effect")
     if effect not in (None, "off"):
         status = "effect_active"
+    elif mode == "color_temp":
+        status = "cached_kelvin" if kelvin_valid and brightness_valid else "incomplete_kelvin"
+    elif mode == "hs":
+        status = "cached_hs" if hs_valid and brightness_valid else "incomplete_hs"
     elif mode != "rgb":
         status = "unsupported_or_unknown_mode"
     elif not rgb_valid or not brightness_valid:
@@ -35,7 +47,9 @@ def cached_light_state(state):
     return {"source": "ha_cache", "status": status, "power": state.state == "on",
             "color_mode": mode,
             "rgb": list(rgb) if mode == "rgb" and rgb_valid else None,
-            "brightness": brightness if brightness_valid else None}
+            "brightness": brightness if brightness_valid else None,
+            **({"kelvin": kelvin if kelvin_valid else None} if mode == "color_temp" else {}),
+            **({"hs": list(hs) if hs_valid else None} if mode == "hs" else {})}
 
 
 def light_catalog(hass):
@@ -93,3 +107,42 @@ def validate_preview_selection(hass, payload):
             or not all(isinstance(device, str) and device in allowed for device in devices)
             or len(devices) != len(set(devices))):
         raise ValueError("invalid preview selection")
+
+
+def enrollment_report(hass, enrolled):
+    """Account for all enrolled IDs, even those omitted from light selection.
+
+    Only the HA registry and state cache are read. A shared HA device is an
+    advisory identity ambiguity (e.g. independent segments), not proof of a
+    duplicate lamp. No live network probe or automatic registry modification.
+    """
+    entries = {entry.id: entry for entry in er.async_get(hass).entities.values()}
+    groups = {}
+    for identity in enrolled:
+        entry = entries.get(identity)
+        if entry is not None and entry.device_id is not None:
+            groups.setdefault(entry.device_id, []).append(identity)
+    shared = {identity for group in groups.values() if len(group) > 1
+              for identity in group}
+    rows = []
+    for identity in sorted(enrolled):
+        entry = entries.get(identity)
+        state = hass.states.get(entry.entity_id) if entry is not None else None
+        if entry is None:
+            status = "missing_registry"
+        elif entry.domain != "light":
+            status = "not_light"
+        elif entry.disabled:
+            status = "disabled"
+        elif entry.hidden:
+            status = "hidden"
+        elif state is None or state.state not in ("on", "off"):
+            status = "unavailable"
+        else:
+            status = "registered"
+        rows.append({"id": identity, "entity_id": entry.entity_id if entry else None,
+                     "name": (entry.name or (state.name if state is not None else None)
+                              or entry.original_name or entry.entity_id) if entry else None,
+                     "status": status, "shared_ha_device": identity in shared,
+                     "observation": cached_light_state(state) if entry and entry.domain == "light" else None})
+    return rows

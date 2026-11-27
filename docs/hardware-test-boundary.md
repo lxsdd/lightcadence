@@ -82,3 +82,17 @@ set both ct_min_kelvin and ct_max_kelvin and omit white_kelvin. Fixed-white
 profiles use white_kelvin; explicit Kelvin targets still require the enrolled
 native range. Chroma frames remain RGB-only. The catalog labels the selected protocol and cadence. The faster
 Chroma UDP route remains unchanged. Loopback tests are not hardware qualification.
+
+
+## HA enrollment diagnostics before calibration
+
+In the physical workspace, expand Enrollment diagnostics after a full Refresh.
+The administrator sees every configured stable registry ID, including missing,
+non-light, disabled, hidden or unavailable entries. Only the existing eligible
+catalog remains selectable. Shared HA device references are warnings to verify
+the mapping, not proof of duplicate physical lamps or grounds for automatic
+device changes. The cache projection distinguishes complete and incomplete RGB,
+Kelvin and hue/saturation values (with brightness), as well as active effects.
+This is read-only HA registry/cache evidence, not a physical state query or
+capability test. Missing or stale mappings require owner-local review; no
+automatic enrolment, credential extraction or registry mutations are performed.

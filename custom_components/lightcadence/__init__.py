@@ -5,7 +5,7 @@ from homeassistant.components import websocket_api
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .catalog import light_catalog, validate_preview_selection
+from .catalog import light_catalog, validate_preview_selection, enrollment_report
 from .client import EngineClient, EngineError
 from .const import DOMAIN, CONF_PORT, CONF_TOKEN, CONF_PHYSICAL
 from .panel import register_panel
@@ -166,6 +166,7 @@ async def ws_catalog(hass, connection, msg):
     clients = hass.data.get(DOMAIN, {})
     lights = light_catalog(hass)
     physical = len(clients) == 1 and next(iter(clients.values())).physical
+    enrollment = None
     if physical:
         try:
             state = await next(iter(clients.values())).state()
@@ -173,6 +174,7 @@ async def ws_catalog(hass, connection, msg):
             connection.send_error(msg["id"], exc.code, "LightCadence engine request failed")
             return
         enrolled = set(state["enrolled_devices"])
+        enrollment = enrollment_report(hass, enrolled)
         transports = state.get("device_transports", {})
         lights = [dict(light, physical_output_enabled=True, transport=transports.get(light["id"]))
                   for light in lights if light["id"] in enrolled]
@@ -181,4 +183,5 @@ async def ws_catalog(hass, connection, msg):
         "entries": sorted(clients),
         "lights": lights,
         "physical_output_enabled": physical,
+        **({"enrollment": enrollment} if enrollment is not None else {}),
     })

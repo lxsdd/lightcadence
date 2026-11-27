@@ -9,8 +9,9 @@ import type {Track,Timing} from "./timeline";
 import type {Plan,SpatialPath} from "./floorplan";
 
 type HA = { callWS<T>(message: Record<string, unknown>): Promise<T> };
-type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; transport?: {kind:string;interval_seconds:number;white_kelvin?:number;ct_min_kelvin?:number;ct_max_kelvin?:number}|null; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null}};
-type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean};
+type Light = {id: string; entity_id: string; name: string; area_id: string | null; available: boolean; transport?: {kind:string;interval_seconds:number;white_kelvin?:number;ct_min_kelvin?:number;ct_max_kelvin?:number}|null; observation?: {source: "ha_cache"; status: string; power: boolean | null; color_mode: string | null; rgb: number[] | null; brightness: number | null; kelvin?:number|null;hs?:number[]|null}};
+type Enrollment = {id:string;entity_id:string|null;name:string|null;status:string;shared_ha_device:boolean;observation?:Light["observation"]|null};
+type Catalog = {schema_version: 1; entries: string[]; lights: Light[]; physical_output_enabled: boolean; enrollment?:Enrollment[]};
 type MixState={master:number;groups:{gain:number;muted:boolean;solo:boolean}[]};
 type Session = {comparison?:{reference:string;targets:Record<string,RGB>};scene_origin?:{scene_id:string;scene_revision:number;scene_name:string};mix?:MixState;timeline?:{beat?:number;duration_beats?:number;markers?:{name:string;time:number;seconds:number}[];duration:number;playhead:number;ended:boolean;loop:boolean;paused?:boolean;auto_end?:boolean;ending?:boolean};id: string; zone_id: string; phase: string; revision: number; devices: string[]; effect: {kind: string; audio_source?:string;tracks?:{name:string}[];layers?:{effect:{kind:string}}[]}};
 type RGB = {red: number; green: number; blue: number; brightness: number; kelvin?:number};
@@ -35,12 +36,13 @@ type Command = CalibrationCommand | MixControl | TimelineControl | LibraryComman
 function requestId() {return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");}
 
 const descriptions: Record<string, string> = {rainbow:"Rainbow", scanner:"Knight Rider / Scanner", pulse:"Pulse",audio_spectrum:"Audio spectrum",static:"Static colour",white:"Static white (Kelvin)",layered:"Layered scene",timeline:"Timeline Studio"};
-function observationLabel(light: Light): string {
+function observationLabel(light: {observation?:Light["observation"]|null}): string {
   const o=light.observation;
   if(!o || o.source!=="ha_cache") return "No cached state";
   const power=o.power===null?"Unknown":o.power?"On":"Off";
-  const label=({cached_rgb:"RGB cached",effect_active:"Effect active",incomplete_rgb:"Incomplete RGB",unsupported_or_unknown_mode:"Mode unsupported or unknown",unavailable:"Unavailable"} as Record<string,string>)[o.status]??"State unknown";
-  return power+" · "+label+" (HA cache, not device feedback)";
+  const label=({cached_rgb:"RGB cached",cached_kelvin:"Kelvin cached",incomplete_kelvin:"Incomplete Kelvin",cached_hs:"Hue/saturation cached",incomplete_hs:"Incomplete hue/saturation",effect_active:"Effect active",incomplete_rgb:"Incomplete RGB",unsupported_or_unknown_mode:"Mode unsupported or unknown",unavailable:"Unavailable"} as Record<string,string>)[o.status]??"State unknown";
+  const detail=o.status==="cached_kelvin"&&o.kelvin!=null?` · ${o.kelvin} K`:o.status==="cached_hs"&&o.hs?` · ${o.hs[0]}° / ${o.hs[1]}%`:"";
+  return power+" · "+label+detail+" (HA cache, not device feedback)";
 }
 function explain(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
@@ -359,6 +361,8 @@ class LightCadencePanel extends LitElement {
   render() {
     const white=this.catalog?.lights.find(l=>l.id===this.manualDevice)?.transport;
     const physical=this.catalog?.physical_output_enabled===true;
+    const enrollment=this.catalog?.enrollment;
+    const enrollmentIssues=enrollment?.filter(r=>r.status!=="registered"||r.shared_ha_device)??[];
     const active=this.snapshot?.sessions.filter(s=>s.phase!=="stopped")??[];
     const recovery=this.snapshot?.recovery_required??[];
     const blocked=new Set(recovery.map(r=>r.device_id));
@@ -376,6 +380,11 @@ class LightCadencePanel extends LitElement {
         <header><div><h1>LightCadence</h1><p>${physical?"Hardware test workspace":"Live preview workspace"}</p></div><span class="badge" data-connected=${this.online?"yes":"no"}>${this.online?"Connected":"Disconnected"}</span></header>
         <p class="notice">${physical?"Hardware candidate — real lamp commands are enabled for enrolled devices only. Not hardware-qualified. Use explicit LightCadence HA actions for cooperating automations. Ordinary light services and Google Home are not intercepted. Colours are targets, not optical feedback.":"Preview only — no physical lamps are controlled. Colours below are engine targets, not device feedback."}</p>
         <div class="toolbar"><p role="status" aria-live="polite">${this.status}</p><button @click=${()=>this.refresh(true)} ?disabled=${this.busy}>Refresh</button></div>
+        ${physical&&enrollment?html`<details><summary>Enrollment diagnostics · ${enrollment.length} enrolled · ${enrollmentIssues.length} need review</summary>
+          <p>Read-only HA registry and cached light state, as of the last full refresh. Refresh to inspect changes. No live LAN probe or optical confirmation. Shared HA devices may represent independent channels; verify their physical identity before enrollment.</p>
+          ${enrollment.map(r=>html`<article><h3>${r.name??"Missing enrolled registry ID"}</h3><p>${r.entity_id??r.id} · ${({registered:"Registered in HA",missing_registry:"Missing registry entry",not_light:"Not a light entity",disabled:"Disabled in HA",hidden:"Hidden in HA",unavailable:"Unavailable in HA"} as Record<string,string>)[r.status]??"Unknown registration status"}${r.shared_ha_device?" · Shares an HA device — verify mapping":""}</p><p>${observationLabel(r)}</p></article>`)}
+        </details>`:nothing}
+
         ${lib?.floorplans?html`<button aria-expanded=${String(this.floorplanOpen)} @click=${()=>this.floorplanOpen=!this.floorplanOpen}>${this.floorplanOpen?"Hide floorplan editor":"Open floorplan editor"}</button>`:nothing}
         ${lib?.floorplans?html`<section ?hidden=${!this.floorplanOpen} aria-labelledby="floorplan"><h2 id="floorplan">Floorplan editor</h2><lightcadence-floorplan .library=${lib} .lights=${this.catalog?.lights??[]} .instanceId=${this.snapshot?.instance_id??""} .disabled=${libraryLocked} .targetColors=${Object.fromEntries(Object.entries(this.snapshot?.targets??{}).map(([id,v])=>[id,color(v.target)]))} @floorplan-command=${(e:CustomEvent<LibraryCommand>)=>this.send(e.detail)}></lightcadence-floorplan></section>`:nothing}
         ${physical&&lib?.calibrations&&this.snapshot?.calibration_bindings?html`<button aria-expanded=${String(this.calibrationOpen)} @click=${()=>this.calibrationOpen=!this.calibrationOpen}>${this.calibrationOpen?"Hide calibration":"Open calibration assistant"}</button><section ?hidden=${!this.calibrationOpen} aria-labelledby="calibration-title"><h2 id="calibration-title">Calibration assistant</h2><lightcadence-calibration .lights=${this.catalog?.lights??[]} .snapshot=${this.snapshot} .projection=${this.calibrationProjection} .disabled=${formLocked||!this.online||!!this.pendingManual} @calibration-command=${(e:CustomEvent<CalibrationCommand>)=>this.send(e.detail)}></lightcadence-calibration></section>`:nothing}

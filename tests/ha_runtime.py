@@ -111,6 +111,23 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
                                    service_data={"entity_id": a.entity_id})
             assert not denied["success"], denied
             assert not authority.writes
+        # A disabled enrollment must be visible diagnostically but not selectable.
+        registry.async_update_entity(b.entity_id, disabled_by=er.RegistryEntryDisabler.USER)
+        async with await auth(session, admin) as diagnostic:
+            cat = await command(diagnostic, 1, "lightcadence/catalog")
+            assert cat["success"], cat
+            assert {l["id"] for l in cat["result"]["lights"]} == {a.id}
+            rows = {row["id"]: row for row in cat["result"]["enrollment"]}
+            assert set(rows) == {a.id, b.id}
+            assert rows[b.id]["status"] == "disabled"
+            assert rows[a.id]["entity_id"] == a.entity_id
+            from custom_components.lightcadence.catalog import enrollment_report
+            missing = enrollment_report(hass, {"missing-synthetic-id"})
+            assert missing == [{"id": "missing-synthetic-id", "entity_id": None,
+                               "name": None, "status": "missing_registry",
+                               "shared_ha_device": False, "observation": None}]
+            assert not fixture.chroma_messages and not authority.writes
+        registry.async_update_entity(b.entity_id, disabled_by=None)
         async with await auth(session, admin) as ws:
             cat = await command(ws, 1, "lightcadence/catalog")
             assert cat["success"] and cat["result"]["physical_output_enabled"], cat
@@ -363,6 +380,18 @@ async def main():
                         hass.states.async_set(b.entity_id, "on", {"color_mode": "color_temp",
                             "rgb_color": (0, 1, 2), "brightness": 10})
                         assert cached_light_state(hass.states.get(b.entity_id))["rgb"] is None
+                        hass.states.async_set(b.entity_id, "on", {"color_mode": "color_temp",
+                            "color_temp_kelvin": 3200, "brightness": 100})
+                        observation = cached_light_state(hass.states.get(b.entity_id))
+                        assert observation["status"] == "cached_kelvin" and observation["kelvin"] == 3200
+                        hass.states.async_set(b.entity_id, "on", {"color_mode": "hs",
+                            "hs_color": (32.5, 60), "brightness": 100})
+                        observation = cached_light_state(hass.states.get(b.entity_id))
+                        assert observation["status"] == "cached_hs" and observation["hs"] == [32.5, 60]
+                        hass.states.async_set(b.entity_id, "on", {"color_mode": "hs",
+                            "hs_color": (361, 60), "brightness": 100})
+                        assert cached_light_state(hass.states.get(b.entity_id))["status"] == "incomplete_hs"
+
                         hass.states.async_set(b.entity_id, "on", {"color_mode": "rgb", "brightness": 10})
                         assert cached_light_state(hass.states.get(b.entity_id))["status"] == "incomplete_rgb"
                         hass.states.async_set(b.entity_id, "unavailable")

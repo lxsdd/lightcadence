@@ -209,12 +209,12 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
                     service="turn_on", service_data={"entity_id": switch_id})
                 assert not refused["success"], refused
             assert runtime.manager.owner(a.id) is None
-            turned_on = await command(ws, 25, "call_service", domain="switch", service="turn_on",
+            turned_on = await command(ws, 14, "call_service", domain="switch", service="turn_on",
                                       service_data={"entity_id": switch_id})
             assert turned_on["success"], turned_on
             assert hass.states.get(switch_id).state == "on"
             owner = runtime.manager.owner(a.id)
-            repeated = await command(ws, 26, "call_service", domain="switch", service="turn_on",
+            repeated = await command(ws, 15, "call_service", domain="switch", service="turn_on",
                                      service_data={"entity_id": switch_id})
             assert repeated["success"] and runtime.manager.owner(a.id) == owner, repeated
             assert owner is not None
@@ -223,7 +223,7 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
             # Library deletion must not prevent stopping an already started scene.
             zone.command({"op": "library_delete", "revision": 2, "kind": "scenes",
                           "id": saved_id, "value": None})
-            stopped = await command(ws, 14, "call_service", domain="switch",
+            stopped = await command(ws, 16, "call_service", domain="switch",
                 service="turn_off", service_data={"entity_id": switch_id})
             assert stopped["success"], stopped
             assert runtime.manager.owner(a.id) is None

@@ -30,7 +30,7 @@ class CalibrationAssistant extends LitElement {
   private inRange(id:string,k:number){const t=this.native(id);return !!t&&Number.isInteger(k)&&k>=t.ct_min_kelvin!&&k<=t.ct_max_kelvin!;}
   private get valid(){return !!this.reference&&!!this.device&&this.reference!==this.device&&[this.level,this.outLevel].every(v=>Number.isFinite(v)&&v>=1&&v<=100)&&(!this.whiteMode||(this.inRange(this.reference,this.goalKelvin)&&(!this.native(this.device)||this.inRange(this.device,this.outKelvin))));}
   private get targets():Record<string,Raw>{return {[this.reference]:{...(this.whiteMode?{kelvin:this.goalKelvin}:{rgb:rgb(this.goal)}),brightness:this.level/100},[this.device]:{...(this.whiteMode&&this.native(this.device)?{kelvin:this.outKelvin}:{rgb:rgb(this.command)}),brightness:this.outLevel/100}};}
-  private matches(t:Target|undefined,raw:Raw){return !!t&&Math.abs(t.brightness-raw.brightness)<1e-8&&("kelvin" in raw?t.kelvin===raw.kelvin:t.kelvin===undefined&&toHex(t)===hex(raw.rgb));}
+  private matchesTarget(t:Target|undefined,raw:Raw){return !!t&&Math.abs(t.brightness-raw.brightness)<1e-8&&("kelvin" in raw?t.kelvin===raw.kelvin:t.kelvin===undefined&&toHex(t)===hex(raw.rgb));}
   private compare(){const s=this.snapshot;if(!s||!this.valid||this.disabled)return;const a=this.active;
     if(a)this.emit({op:"calibration_adjust",instance_id:s.instance_id,session_id:a.id,revision:a.revision,targets:this.targets});
     else this.emit({op:"calibration_start",instance_id:s.instance_id,request_id:Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join(""),devices:[this.reference,this.device],reference:this.reference,targets:this.targets});}
@@ -45,7 +45,7 @@ class CalibrationAssistant extends LitElement {
   render(){const s=this.snapshot,lib=s?.library,b=s?.calibration_bindings?.[this.device],active=this.active;
     const lamps=this.lights.filter(l=>s?.calibration_bindings?.[l.id]&&(this.whiteMode||l.transport?.white_kelvin===undefined));
     const profiles=(lib?.calibrations??[]).filter(p=>b&&p.selector.model===b.model&&p.selector.firmware===b.firmware&&p.selector.transport===b.transport&&(!p.selector.device_id||p.selector.device_id===this.device));
-    const confirmed=active?.comparison&&this.matches(active.comparison.targets[this.reference],this.targets[this.reference])&&this.matches(active.comparison.targets[this.device],this.targets[this.device]);
+    const confirmed=active?.comparison&&this.matchesTarget(active.comparison.targets[this.reference],this.targets[this.reference])&&this.matchesTarget(active.comparison.targets[this.device],this.targets[this.device]);
     const stale=this.draftRevision!==lib?.revision;
     return html`<p>Visual comparison — RGB or explicit native Kelvin reference. Compare sends real light commands only after pressing Start/Apply. Raw test targets bypass calibration. Stop the comparison in Running shows to restore originals. Other HA/LAN clients are not intercepted.</p>
     <label><input type="checkbox" aria-label="Native Kelvin comparison" .checked=${this.whiteMode} ?disabled=${this.disabled||!!active} @change=${(e:Event)=>{this.whiteMode=(e.target as HTMLInputElement).checked;this.reference="";if(!this.whiteMode&&this.lights.find(l=>l.id===this.device)?.transport?.white_kelvin!==undefined)this.choose("");}}> Native Kelvin reference (enrolled Yeelight TCP only)</label>

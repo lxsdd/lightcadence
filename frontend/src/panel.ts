@@ -188,6 +188,7 @@ class LightCadencePanel extends LitElement {
       if(epoch!==this.epoch) return;
       this.accept(state);
       if(payload.op==="calibration_project")this.calibrationProjection=state.calibration_projection;
+      if((payload.op==="library_save"||payload.op==="library_delete")&&payload.kind==="calibrations"){(this.renderRoot.querySelector("lightcadence-calibration") as (HTMLElement & {confirmed:(command:CalibrationCommand,s:Snapshot)=>void})|null)?.confirmed(payload,state);}
       if((payload.op==="library_save"||payload.op==="library_delete")&&payload.kind==="floorplans"){(this.renderRoot.querySelector("lightcadence-floorplan") as (HTMLElement & {confirmed:()=>void})|null)?.confirmed();}
       if(payload.op==="library_save"||payload.op==="library_delete"){this.spatialPath="";this.selectedZone="";this.selectedScene="";this.loadedLibraryRevision=-1;}
       if(payload.op==="start") this.pendingStart=undefined;

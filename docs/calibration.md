@@ -36,7 +36,7 @@ sending set_scene ct. Chroma remains RGB-only for frames. A common explicit
 Kelvin goal can be projected to HA color_temp_kelvin or recorded RGB/HSV
 targets without sending any device or scene command. Existing ordinary RGB
 effects remain RGB; explicit Kelvin authoring in scene/timeline effects,
-multi-client draft recovery, colorimeter support and actual hardware acceptance
+unsaved multi-client profile draft recovery, colorimeter support and actual hardware acceptance
 remain open.
 Explicit dual-mode Yeelight profiles can capture and restore either native RGB
 or CT state while the current comparison output still uses RGB. Set both
@@ -49,3 +49,8 @@ to alter hidden attributes; an unconfirmed restore retains ownership. No househo
 ## Read-only native HA target proposals
 
 The physical authenticated command calibration_project uses the current library revision and engine instance fence. It accepts explicit nominal RGB8/brightness targets, applies the same renderer correction and uses the existing native quantization (Yeelight RGB/percent; Tuya HSV/value). The panel shows proposed HA entities JSON from a common goal or from inspected native scene targets. No scene is activated, created or modified. Existing scene targets may already include corrections: never apply a second correction without review. HA integration color-mode conversion and physical fidelity need acceptance; unsupported/zero targets are rejected. The copied proposal is not a live snapshot of any later scene or profile edits.
+
+
+## Reopen a running comparison and continue recording
+
+A second browser can explicitly reopen a running server comparison from its current reference, counterpart, RGB/Kelvin targets and brightness. Reopening is read-only, does not start a second session or send any lamp command. Saved profiles can then be loaded by ID; unsaved profile anchors remain local to the original browser. Switching to a different comparison resets the local unsaved profile draft. Successful profile saves advance the editor's revision fence and select the saved profile, so additional anchors update the same profile rather than creating duplicates. External library changes and engine instance changes still require an explicit reload. The read-only proposal is hidden after changing the common goal.

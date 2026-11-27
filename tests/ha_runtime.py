@@ -181,6 +181,18 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
                                     "effect": {"kind": "static", "period_seconds": 4, "brightness": .5,
                                                "color": [1,0,0], "width": .25}, "stop_policy": "restore"}})
             saved_id = zone.snapshot()["scenes"][0]["id"]
+            # No switch entity exists until the administrator explicitly selects a scene.
+            assert not [e for e in er.async_entries_for_config_entry(registry, entry_id) if e.domain == "switch"]
+            options = await hass.config_entries.options.async_init(entry_id)
+            assert options["type"] == "form", options
+            options = await hass.config_entries.options.async_configure(options["flow_id"],
+                {"scene_switches": [saved_id]})
+            assert options["type"] == "create_entry", options
+            await hass.async_block_till_done()
+            switches = [e for e in er.async_entries_for_config_entry(registry, entry_id) if e.domain == "switch"]
+            assert len(switches) == 1, switches
+            switch_id = switches[0].entity_id
+            assert hass.states.get(switch_id).state == "off"
             before = len(authority.writes)
             original_a = authority.states[a.id]
             async with await auth(session, ordinary) as nonadmin:
@@ -192,20 +204,32 @@ async def physical_path(hass, session, admin, ordinary, old_entry, registry, a, 
                 service="start_scene", service_data={"scene_id": "unknown"})
             assert not denied["success"], denied
             assert len(authority.writes) == before
-            await hass.services.async_call("lightcadence", "start_scene", {"scene_id": saved_id}, blocking=True)
+            async with await auth(session, ordinary) as nonadmin:
+                refused = await command(nonadmin, 2, "call_service", domain="switch",
+                    service="turn_on", service_data={"entity_id": switch_id})
+                assert not refused["success"], refused
+            assert runtime.manager.owner(a.id) is None
+            turned_on = await command(ws, 25, "call_service", domain="switch", service="turn_on",
+                                      service_data={"entity_id": switch_id})
+            assert turned_on["success"], turned_on
+            assert hass.states.get(switch_id).state == "on"
             owner = runtime.manager.owner(a.id)
+            repeated = await command(ws, 26, "call_service", domain="switch", service="turn_on",
+                                     service_data={"entity_id": switch_id})
+            assert repeated["success"] and runtime.manager.owner(a.id) == owner, repeated
             assert owner is not None
             snapshot = next(s for s in runtime.state()["sessions"] if s["id"] == owner)
             assert snapshot["scene_origin"]["scene_id"] == saved_id
             # Library deletion must not prevent stopping an already started scene.
             zone.command({"op": "library_delete", "revision": 2, "kind": "scenes",
                           "id": saved_id, "value": None})
-            stopped = await command(ws, 14, "call_service", domain="lightcadence",
-                service="stop_scene", service_data={"scene_id": saved_id})
+            stopped = await command(ws, 14, "call_service", domain="switch",
+                service="turn_off", service_data={"entity_id": switch_id})
             assert stopped["success"], stopped
             assert runtime.manager.owner(a.id) is None
             assert authority.states[a.id] == original_a
             assert len(authority.writes) == before + 1
+            assert hass.states.get(switch_id).state == "unavailable"
             await hass.services.async_call("lightcadence", "stop_scene", {"scene_id": saved_id}, blocking=True)
             assert len(authority.writes) == before + 1
         assert await hass.config_entries.async_unload(entry_id)

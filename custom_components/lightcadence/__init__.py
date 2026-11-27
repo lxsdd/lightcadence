@@ -38,10 +38,15 @@ async def async_setup_entry(hass, entry):
             raise ConfigEntryAuthFailed("Local engine authentication failed") from None
         raise ConfigEntryNotReady("Local engine unavailable") from None
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = client
+    if client.physical:
+        await hass.config_entries.async_forward_entry_setups(entry, ["switch"])
     return True
 
 
 async def async_unload_entry(hass, entry):
+    if entry.data.get(CONF_PHYSICAL, False):
+        if not await hass.config_entries.async_unload_platforms(entry, ["switch"]):
+            return False
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     # Disconnecting HA never stops server-owned sessions.
     return True

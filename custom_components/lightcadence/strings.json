@@ -19,5 +19,23 @@
     "abort": {
       "already_configured": "The local engine is already configured"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Show switches",
+        "description": "Select saved non-audio scenes to expose as HA switches. Removing a switch never stops a show. Configure Google Home exposure separately.",
+        "data": {
+          "scene_switches": "Saved scenes"
+        }
+      }
+    },
+    "error": {
+      "invalid_scene_selection": "Select available saved scenes"
+    },
+    "abort": {
+      "preview_only": "Show switches require the explicitly enabled physical candidate",
+      "engine_unavailable": "Local engine unavailable"
+    }
   }
 }

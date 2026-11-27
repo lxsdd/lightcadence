@@ -4,8 +4,8 @@ from dataclasses import asdict
 from time import monotonic
 from uuid import uuid4
 
-from .effects import LightTarget, linear_channel, decode_effect, Effect, EffectKind
-from .calibration import compile_profiles, raw_targets, selector
+from .effects import LightTarget, KelvinTarget, linear_channel, decode_effect, Effect, EffectKind
+from .calibration import compile_profiles, raw_targets, selector, supports_native_white, validate_raw, Correction
 from .sessions import DeviceState, Phase, SessionManager, StopPolicy
 from .enrollment import PhysicalSessions
 from .audio import AudioHub
@@ -74,7 +74,7 @@ class PreviewRuntime:
         self.device_bindings = {}
         self.targets = {}
 
-    def calibrate(self, device, target):
+    def correction(self, device):
         # Cache compiled immutable profiles by library revision. The normal
         # manager calls this once after all scene/mixer/audio composition.
         lib = self.library
@@ -82,11 +82,30 @@ class PreviewRuntime:
         if self._calibration_cache[0] != key:
             self._calibration_cache = (key, compile_profiles(lib.data["calibrations"]))
         binding = self.device_bindings.get(device)
-        if binding is None or getattr(self, "device_transports", {}).get(device, {}).get("white_kelvin") is not None:
-            return target
+        if binding is None:
+            return None
         profiles = self._calibration_cache[1]
-        correction = profiles.get(selector({**binding, "device_id": device})) or profiles.get(selector(binding))
+        return profiles.get(selector({**binding, "device_id": device})) or profiles.get(selector(binding))
+
+    def calibrate(self, device, target):
+        transport = getattr(self, "device_transports", {}).get(device, {})
+        correction = self.correction(device)
+        if isinstance(target, KelvinTarget):
+            native_ct = supports_native_white(transport)
+            if correction is None:
+                if not native_ct:
+                    raise ValueError("record RGB white anchors before projecting Kelvin")
+                result = target
+            else:
+                result = correction.white_target(target, native_ct)
+            return validate_raw(result, transport)
+        if transport.get("white_kelvin") is not None:
+            return target
         return target if correction is None else correction.apply(target)
+
+    def comparison_targets(self, value, devices):
+        return {d: validate_raw(t, self.device_transports[d])
+                for d,t in raw_targets(value, devices).items()}
 
     def library_command(self, body):
         if body.get("kind") == "calibrations":
@@ -106,6 +125,18 @@ class PreviewRuntime:
                     raise ValueError("calibration binding mismatch")
                 if device is None and sel not in self.device_bindings.values():
                     raise ValueError("unknown enrolled model binding")
+                profile = Correction.decode(body["value"])
+                if profile.white_points:
+                    for d, binding in self.device_bindings.items():
+                        if (device is not None and d != device) or binding != {k:v for k,v in sel.items() if k != "device_id"}:
+                            continue
+                        transport = self.device_transports[d]
+                        for _, command in profile.white_points:
+                            target = (KelvinTarget(1,1,1,1,command) if type(command) is int
+                                      else LightTarget(*command,1))
+                            validate_raw(target, transport)
+                            if supports_native_white(transport) != isinstance(target, KelvinTarget):
+                                raise ValueError("white anchor must use the enrolled native white mode")
         self.library.command(body)
 
     def tick(self):
@@ -333,10 +364,16 @@ class PhysicalRuntime(PreviewRuntime):
             requested = raw_targets(body["targets"], devices)
             projected = {}
             for d, nominal in requested.items():
-                if self.device_transports[d].get("white_kelvin") is not None or nominal.brightness == 0 or max(nominal.red,nominal.green,nominal.blue) == 0:
-                    raise ValueError("initial native export requires nonblack RGB-on targets")
+                if nominal.brightness == 0 or max(nominal.red,nominal.green,nominal.blue) == 0:
+                    raise ValueError("native export requires nonblack on targets")
+                if not isinstance(nominal, KelvinTarget):
+                    validate_raw(nominal, self.device_transports[d])
                 target = self.calibrate(d, nominal)
-                if self.device_bindings[d]["transport"] == "tuya_v35":
+                if isinstance(target, KelvinTarget):
+                    bright = round(target.brightness*100)
+                    attrs = {"state":"on","color_temp_kelvin":target.kelvin,"brightness":max(1,round(bright*255/100))}
+                    command = {"kelvin":target.kelvin,"brightness_pct":bright}
+                elif self.device_bindings[d]["transport"] == "tuya_v35":
                     native = project_state(DeviceState(True, target)).native_hsv
                     h,s,v = (int(native[i:i+4],16) for i in (0,4,8))
                     if not v:
@@ -356,9 +393,7 @@ class PhysicalRuntime(PreviewRuntime):
             devices = body["devices"]
             if not isinstance(devices, list) or len(devices) < 2 or not all(isinstance(d, str) and d in self.device_bindings for d in devices) or len(set(devices)) != len(devices) or body["reference"] not in devices:
                 raise ValueError("select distinct enrolled comparison lamps")
-            if any(self.device_transports[d].get("white_kelvin") is not None for d in devices):
-                raise ValueError("initial RGB comparison requires RGB capable transport")
-            targets = raw_targets(body["targets"], devices)
+            targets = self.comparison_targets(body["targets"], devices)
             await self.physical.start(identity(body["request_id"]), "Calibration comparison", devices,
                 Effect(EffectKind.STATIC), StopPolicy.RESTORE, comparison=targets, reference=body["reference"])
             self.tick()
@@ -367,7 +402,7 @@ class PhysicalRuntime(PreviewRuntime):
             fields(body, ("op", "session_id", "revision", "targets"))
             sid = identity(body["session_id"])
             session = self.manager.snapshot(sid)
-            self.manager.comparison_adjust(sid, body["revision"], raw_targets(body["targets"], session.devices))
+            self.manager.comparison_adjust(sid, body["revision"], self.comparison_targets(body["targets"], session.devices))
             self.tick()
             return self.state()
         if isinstance(body, dict) and body.get("op") == "scene_start":

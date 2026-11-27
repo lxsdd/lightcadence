@@ -79,7 +79,7 @@ class ProjectLibrary:
                 raise ValueError("invalid library collection")
             for obj in doc[kind]:
                 keys = ("schema_version", "id", "revision", "updated_at", "name")
-                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") + (("ha_source",) if isinstance(obj, dict) and "ha_source" in obj else ()) if kind == "scenes" else PROFILE_FIELDS[1:] if kind == "calibrations" else ("width", "height", "features")))
+                exact(obj, keys + (("devices",) if kind == "zones" else ("zone_id", "effect", "stop_policy") + (("ha_source",) if isinstance(obj, dict) and "ha_source" in obj else ()) if kind == "scenes" else PROFILE_FIELDS[1:] + (("white_points",) if isinstance(obj, dict) and "white_points" in obj else ()) if kind == "calibrations" else ("width", "height", "features")))
                 if (type(obj["schema_version"]) is not int or obj["schema_version"] != 1 or
                         type(obj["revision"]) is not int or obj["revision"] < 1 or
                         not isinstance(obj["id"], str) or str(UUID(obj["id"])) != obj["id"] or obj["id"] in ids):

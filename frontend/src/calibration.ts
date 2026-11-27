@@ -2,13 +2,14 @@ import {LitElement, html, css} from "lit";
 type Binding={model:string;firmware:string;transport:string;device_id?:string};
 type Point={goal:number[];command:number[]};
 type Level={goal:number;command:number};
-export type CalibrationRow={id:string;name:string;selector:Binding;points:Point[];brightness:Level[];minimum:number;revision:number};
-type Raw={rgb:number[];brightness:number};
-type Target={red:number;green:number;blue:number;brightness:number};
+type WhitePoint={goal:number;command:number|number[]};
+export type CalibrationRow={id:string;name:string;selector:Binding;points:Point[];brightness:Level[];minimum:number;revision:number;white_points?:WhitePoint[]};
+type Raw=({rgb:number[]}|{kelvin:number})&{brightness:number};
+type Target={red:number;green:number;blue:number;brightness:number;kelvin?:number};
 type Comparison={reference:string;targets:Record<string,Target>};
 type Session={id:string;phase:string;revision:number;devices:string[];comparison?:Comparison};
 type Snap={instance_id:string;calibration_bindings?:Record<string,Binding>;sessions:Session[];library?:{revision:number;calibrations?:CalibrationRow[];fault:boolean;persistent:boolean}};
-type Lamp={id:string;name:string;entity_id?:string;transport?:{white_kelvin?:number}|null};
+type Lamp={id:string;name:string;entity_id?:string;transport?:{kind?:string;white_kelvin?:number;ct_min_kelvin?:number;ct_max_kelvin?:number}|null};
 export type Projection={instance_id:string;revision:number;targets:Record<string,{ha:Record<string,unknown>;native:Record<string,unknown>}>};
 export type CalibrationCommand=
   {op:"calibration_project";instance_id:string;revision:number;devices:string[];targets:Record<string,Raw>}|
@@ -19,42 +20,47 @@ const hex=(rgb:number[])=>"#"+rgb.map(v=>v.toString(16).padStart(2,"0")).join(""
 const rgb=(value:string)=>[1,3,5].map(i=>parseInt(value.slice(i,i+2),16));
 const toHex=(t:Target)=>hex([t.red,t.green,t.blue].map(v=>Math.round(255*(v<=.0031308?12.92*v:1.055*v**(1/2.4)-.055))));
 class CalibrationAssistant extends LitElement {
-  static properties={lights:{attribute:false},snapshot:{attribute:false},projection:{attribute:false},disabled:{type:Boolean},reference:{state:true},device:{state:true},goal:{state:true},command:{state:true},level:{state:true},outLevel:{state:true},points:{state:true},curve:{state:true},minimum:{state:true},title:{state:true},model:{state:true},selected:{state:true},draftRevision:{state:true}};
+  static properties={lights:{attribute:false},snapshot:{attribute:false},projection:{attribute:false},disabled:{type:Boolean},reference:{state:true},device:{state:true},goal:{state:true},command:{state:true},level:{state:true},outLevel:{state:true},points:{state:true},curve:{state:true},minimum:{state:true},title:{state:true},model:{state:true},selected:{state:true},draftRevision:{state:true},whiteMode:{state:true},goalKelvin:{state:true},outKelvin:{state:true},whitePoints:{state:true}};
   declare lights:Lamp[];declare snapshot?:Snap;declare projection?:Projection;declare disabled:boolean;
-  declare reference:string;declare device:string;declare goal:string;declare command:string;declare level:number;declare outLevel:number;declare points:Point[];declare curve:Level[];declare minimum:number;declare title:string;declare model:boolean;declare selected:string;declare draftRevision:number;
-  constructor(){super();this.lights=[];this.disabled=false;this.reference="";this.device="";this.goal="#ffffff";this.command="#ffffff";this.level=50;this.outLevel=50;this.points=[];this.curve=[];this.minimum=1;this.title="";this.model=false;this.selected="";this.draftRevision=-1;}
+  declare reference:string;declare device:string;declare goal:string;declare command:string;declare level:number;declare outLevel:number;declare points:Point[];declare curve:Level[];declare minimum:number;declare title:string;declare model:boolean;declare selected:string;declare draftRevision:number;declare whiteMode:boolean;declare goalKelvin:number;declare outKelvin:number;declare whitePoints:WhitePoint[];
+  constructor(){super();this.lights=[];this.disabled=false;this.reference="";this.device="";this.goal="#ffffff";this.command="#ffffff";this.level=50;this.outLevel=50;this.points=[];this.curve=[];this.minimum=1;this.title="";this.model=false;this.selected="";this.draftRevision=-1;this.whiteMode=false;this.goalKelvin=3000;this.outKelvin=3000;this.whitePoints=[];}
   private emit(command:CalibrationCommand){this.dispatchEvent(new CustomEvent("calibration-command",{detail:command,bubbles:true,composed:true}));}
   private get active(){return this.snapshot?.sessions.find(s=>s.phase==="running"&&s.comparison&&s.devices.length===2&&s.comparison.reference===this.reference&&s.devices.includes(this.device));}
-  private get valid(){return !!this.reference&&!!this.device&&this.reference!==this.device&&[this.level,this.outLevel].every(v=>Number.isFinite(v)&&v>=1&&v<=100);}
-  private get targets(){return {[this.reference]:{rgb:rgb(this.goal),brightness:this.level/100},[this.device]:{rgb:rgb(this.command),brightness:this.outLevel/100}};}
+  private native(id:string){const t=this.lights.find(l=>l.id===id)?.transport;return t?.kind==="yeelight_tcp"&&t.ct_min_kelvin!==undefined?t:undefined;}
+  private inRange(id:string,k:number){const t=this.native(id);return !!t&&Number.isInteger(k)&&k>=t.ct_min_kelvin!&&k<=t.ct_max_kelvin!;}
+  private get valid(){return !!this.reference&&!!this.device&&this.reference!==this.device&&[this.level,this.outLevel].every(v=>Number.isFinite(v)&&v>=1&&v<=100)&&(!this.whiteMode||(this.inRange(this.reference,this.goalKelvin)&&(!this.native(this.device)||this.inRange(this.device,this.outKelvin))));}
+  private get targets():Record<string,Raw>{return {[this.reference]:{...(this.whiteMode?{kelvin:this.goalKelvin}:{rgb:rgb(this.goal)}),brightness:this.level/100},[this.device]:{...(this.whiteMode&&this.native(this.device)?{kelvin:this.outKelvin}:{rgb:rgb(this.command)}),brightness:this.outLevel/100}};}
+  private matches(t:Target|undefined,raw:Raw){return !!t&&Math.abs(t.brightness-raw.brightness)<1e-8&&("kelvin" in raw?t.kelvin===raw.kelvin:t.kelvin===undefined&&toHex(t)===hex(raw.rgb));}
   private compare(){const s=this.snapshot;if(!s||!this.valid||this.disabled)return;const a=this.active;
     if(a)this.emit({op:"calibration_adjust",instance_id:s.instance_id,session_id:a.id,revision:a.revision,targets:this.targets});
     else this.emit({op:"calibration_start",instance_id:s.instance_id,request_id:Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join(""),devices:[this.reference,this.device],reference:this.reference,targets:this.targets});}
   private project(){const s=this.snapshot;if(!s?.library||!this.valid||this.disabled)return;
-    const ids=[this.reference,this.device],t={rgb:rgb(this.goal),brightness:this.level/100};
+    const ids=[this.reference,this.device],t:Raw={...(this.whiteMode?{kelvin:this.goalKelvin}:{rgb:rgb(this.goal)}),brightness:this.level/100};
     this.emit({op:"calibration_project",instance_id:s.instance_id,revision:s.library.revision,devices:ids,targets:Object.fromEntries(ids.map(d=>[d,t]))});}
-  private choose(device:string){this.device=device;this.selected="";this.points=[];this.curve=[];this.minimum=1;this.title="";this.model=false;this.draftRevision=this.snapshot?.library?.revision??-1;}
-  private load(id:string){const row=this.snapshot?.library?.calibrations?.find(p=>p.id===id);if(!row)return;this.selected=id;this.title=row.name;this.model=!row.selector.device_id;this.points=structuredClone(row.points);this.curve=structuredClone(row.brightness);this.minimum=row.minimum*100;this.draftRevision=this.snapshot?.library?.revision??-1;}
+  private choose(device:string){this.device=device;this.selected="";this.points=[];this.curve=[];this.whitePoints=[];this.minimum=1;this.title="";this.model=false;this.draftRevision=this.snapshot?.library?.revision??-1;}
+  private load(id:string){const row=this.snapshot?.library?.calibrations?.find(p=>p.id===id);if(!row)return;this.selected=id;this.title=row.name;this.model=!row.selector.device_id;this.points=structuredClone(row.points);this.curve=structuredClone(row.brightness);this.whitePoints=structuredClone(row.white_points??[]);this.minimum=row.minimum*100;this.draftRevision=this.snapshot?.library?.revision??-1;}
   private save(remove=false){const s=this.snapshot,b=s?.calibration_bindings?.[this.device],lib=s?.library;if(!s||!b||!lib||this.disabled)return;
-    const value={name:this.title,selector:{...b,...(this.model?{}:{device_id:this.device})},points:this.points,brightness:this.curve,minimum:this.minimum/100};
+    const value={name:this.title,selector:{...b,...(this.model?{}:{device_id:this.device})},points:this.points,brightness:this.curve,minimum:this.minimum/100,...(this.whitePoints.length?{white_points:this.whitePoints}:{})};
     this.emit({op:remove?"library_delete":"library_save",kind:"calibrations",instance_id:s.instance_id,revision:this.draftRevision,id:this.selected||null,value:remove?null:value});}
   render(){const s=this.snapshot,lib=s?.library,b=s?.calibration_bindings?.[this.device],active=this.active;
-    const lamps=this.lights.filter(l=>s?.calibration_bindings?.[l.id]&&l.transport?.white_kelvin===undefined);
+    const lamps=this.lights.filter(l=>s?.calibration_bindings?.[l.id]&&(this.whiteMode||l.transport?.white_kelvin===undefined));
     const profiles=(lib?.calibrations??[]).filter(p=>b&&p.selector.model===b.model&&p.selector.firmware===b.firmware&&p.selector.transport===b.transport&&(!p.selector.device_id||p.selector.device_id===this.device));
-    const confirmed=active?.comparison&&active.comparison.targets[this.reference]&&active.comparison.targets[this.device]&&toHex(active.comparison.targets[this.reference])===this.goal&&toHex(active.comparison.targets[this.device])===this.command&&Math.abs(active.comparison.targets[this.reference].brightness-this.level/100)<1e-8&&Math.abs(active.comparison.targets[this.device].brightness-this.outLevel/100)<1e-8;
+    const confirmed=active?.comparison&&this.matches(active.comparison.targets[this.reference],this.targets[this.reference])&&this.matches(active.comparison.targets[this.device],this.targets[this.device]);
     const stale=this.draftRevision!==lib?.revision;
-    return html`<p>Visual RGB comparison — choose any two enrolled RGB lamps. Compare sends real light commands only after pressing Start/Apply. Raw test targets bypass calibration. Stop the comparison in Running shows to restore originals. Other HA/LAN clients are not intercepted.</p>
-    <div class="cols"><label>Reference lamp<select aria-label="Calibration reference" .value=${this.reference} ?disabled=${this.disabled||!!active} @change=${(e:Event)=>this.reference=(e.target as HTMLSelectElement).value}><option value="">Choose reference</option>${lamps.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
+    return html`<p>Visual comparison — RGB or explicit native Kelvin reference. Compare sends real light commands only after pressing Start/Apply. Raw test targets bypass calibration. Stop the comparison in Running shows to restore originals. Other HA/LAN clients are not intercepted.</p>
+    <label><input type="checkbox" aria-label="Native Kelvin comparison" .checked=${this.whiteMode} ?disabled=${this.disabled||!!active} @change=${(e:Event)=>{this.whiteMode=(e.target as HTMLInputElement).checked;this.reference="";if(!this.whiteMode&&this.lights.find(l=>l.id===this.device)?.transport?.white_kelvin!==undefined)this.choose("");}}> Native Kelvin reference (enrolled Yeelight TCP only)</label>
+    <div class="cols"><label>Reference lamp<select aria-label="Calibration reference" .value=${this.reference} ?disabled=${this.disabled||!!active} @change=${(e:Event)=>this.reference=(e.target as HTMLSelectElement).value}><option value="">Choose reference</option>${lamps.filter(l=>!this.whiteMode||!!this.native(l.id)).map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
     <label>Lamp to calibrate<select aria-label="Calibration lamp" .value=${this.device} ?disabled=${this.disabled||!!active} @change=${(e:Event)=>this.choose((e.target as HTMLSelectElement).value)}><option value="">Choose lamp</option>${lamps.map(l=>html`<option value=${l.id}>${l.name}</option>`)}</select></label>
-    <label>Reference colour<input aria-label="Calibration goal colour" type="color" .value=${this.goal} @input=${(e:Event)=>this.goal=(e.target as HTMLInputElement).value}></label>
-    <label>Adjusted lamp colour<input aria-label="Calibration command colour" type="color" .value=${this.command} @input=${(e:Event)=>this.command=(e.target as HTMLInputElement).value}></label>
+    ${this.whiteMode?html`<label>Reference Kelvin<input aria-label="Calibration goal Kelvin" type="number" min="1700" max="6500" step="1" .value=${String(this.goalKelvin)} @input=${(e:Event)=>this.goalKelvin=(e.target as HTMLInputElement).valueAsNumber}></label>`:html`<label>Reference colour<input aria-label="Calibration goal colour" type="color" .value=${this.goal} @input=${(e:Event)=>this.goal=(e.target as HTMLInputElement).value}></label>`}
+    ${this.whiteMode&&this.native(this.device)?html`<label>Adjusted Kelvin<input aria-label="Calibration command Kelvin" type="number" min="1700" max="6500" step="1" .value=${String(this.outKelvin)} @input=${(e:Event)=>this.outKelvin=(e.target as HTMLInputElement).valueAsNumber}></label>`:html`<label>Adjusted lamp colour<input aria-label="Calibration command colour" type="color" .value=${this.command} @input=${(e:Event)=>this.command=(e.target as HTMLInputElement).value}></label>`}
     <label>Reference brightness (%)<input type="number" min="1" max="100" .value=${String(this.level)} @input=${(e:Event)=>this.level=(e.target as HTMLInputElement).valueAsNumber}></label>
     <label>Adjusted brightness (%)<input type="number" min="1" max="100" .value=${String(this.outLevel)} @input=${(e:Event)=>this.outLevel=(e.target as HTMLInputElement).valueAsNumber}></label></div>
     <button ?disabled=${this.disabled||!this.valid} @click=${()=>this.compare()}>${active?"Apply comparison targets":"Start comparison"}</button>
     <p>${confirmed?"Engine targets accepted — visually check both lamps before recording.":"Apply the current targets before recording."}</p>
-    <button ?disabled=${this.disabled||!confirmed} @click=${()=>{const a={goal:rgb(this.goal),command:rgb(this.command)};this.points=[...this.points.filter(p=>hex(p.goal)!==this.goal),a];}}>Record colour point</button>
+    ${this.whiteMode?html`<button ?disabled=${this.disabled||!confirmed} @click=${()=>{const a={goal:this.goalKelvin,command:this.native(this.device)?this.outKelvin:rgb(this.command)};this.whitePoints=[...this.whitePoints.filter(p=>p.goal!==a.goal),a].sort((a,b)=>a.goal-b.goal);}}>Record white point</button>`:html`<button ?disabled=${this.disabled||!confirmed} @click=${()=>{const a={goal:rgb(this.goal),command:rgb(this.command)};this.points=[...this.points.filter(p=>hex(p.goal)!==this.goal),a];}}>Record colour point</button>`}
     <button ?disabled=${this.disabled||!confirmed} @click=${()=>{this.curve=[...this.curve.filter(p=>p.goal!==this.level/100),{goal:this.level/100,command:this.outLevel/100}].sort((a,b)=>a.goal-b.goal);}}>Record brightness point</button>
-    <p>Colour anchors: ${this.points.length}; brightness anchors: ${this.curve.length}</p>
+    <p>Colour anchors: ${this.points.length}; brightness anchors: ${this.curve.length}; white anchors: ${this.whitePoints.length}</p>
+    ${this.whitePoints.map((p,i)=>html`<div>${p.goal} K → ${typeof p.command==="number"?p.command+" K":hex(p.command)} <button @click=${()=>this.whitePoints=this.whitePoints.filter((_,j)=>i!==j)}>Remove white point</button></div>`)}
     ${this.points.map((p,i)=>html`<div>${hex(p.goal)} → ${hex(p.command)} <button @click=${()=>this.points=this.points.filter((_,j)=>i!==j)}>Remove colour point</button></div>`)}
     ${this.curve.map((p,i)=>html`<div>${p.goal*100}% → ${p.command*100}% <button @click=${()=>this.curve=this.curve.filter((_,j)=>i!==j)}>Remove brightness point</button></div>`)}
     <label>Load existing profile<select .value=${this.selected} @change=${(e:Event)=>{const id=(e.target as HTMLSelectElement).value;if(id)this.load(id);else this.choose(this.device);}}><option value="">New profile</option>${profiles.map(p=>html`<option value=${p.id}>${p.name}</option>`)}</select></label>

@@ -552,11 +552,11 @@ try {
       window.calibrationCalls=[];
       const linear=v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;};
       panel.hass={callWS:async msg=>{
-        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null,...(id==="a"?{transport:{kind:"yeelight_tcp",ct_min_kelvin:2700,ct_max_kelvin:6500}}:{})}))};
         if(msg.payload){const p=msg.payload;window.calibrationCalls.push(structuredClone(p));
           if(p.op==="calibration_start")state.sessions=[{id:"compare",zone_id:"Calibration comparison",phase:"running",revision:1,devices:p.devices,effect:{kind:"static"},comparison:{reference:p.reference,targets:{}}}];
           if(p.op==="calibration_adjust")state.sessions[0].revision++;
-          if(p.op==="calibration_start"||p.op==="calibration_adjust")state.sessions[0].comparison.targets=Object.fromEntries(Object.entries(p.targets).map(([id,t])=>[id,{red:linear(t.rgb[0]),green:linear(t.rgb[1]),blue:linear(t.rgb[2]),brightness:t.brightness}]));
+          if(p.op==="calibration_start"||p.op==="calibration_adjust")state.sessions[0].comparison.targets=Object.fromEntries(Object.entries(p.targets).map(([id,t])=>[id,t.kelvin?{red:1,green:1,blue:1,brightness:t.brightness,kelvin:t.kelvin}:{red:linear(t.rgb[0]),green:linear(t.rgb[1]),blue:linear(t.rgb[2]),brightness:t.brightness}]));
           if(p.op==="library_save"){state.library.revision++;state.library.calibrations=[{id:"profile",revision:1,...p.value}];}
           if(p.op==="calibration_project")return {...structuredClone(state),calibration_projection:{instance_id:"calibration",revision:state.library.revision,targets:{a:{ha:{state:"on",rgb_color:[255,255,255],brightness:128},native:{}},b:{ha:{state:"on",rgb_color:[240,245,255],brightness:128},native:{}}}}};
           if(p.op==="stop"){state.sessions=[];}
@@ -584,6 +584,17 @@ try {
     await page.getByRole("button",{name:"Calculate common-goal HA targets"}).click();
     await page.getByLabel("Common-goal HA targets",{exact:true}).waitFor();
     assert.ok((await page.getByLabel("Common-goal HA targets",{exact:true}).inputValue()).includes("light.b"));
+    await page.getByRole("button",{name:"Stop show",exact:true}).click();
+    await page.getByText("No active shows.",{exact:false}).waitFor();
+    await page.getByLabel("Native Kelvin comparison",{exact:true}).check();
+    await page.getByLabel("Calibration reference",{exact:true}).selectOption("a");
+    await page.getByRole("button",{name:"Start comparison",exact:true}).click();
+    await page.getByText("Engine targets accepted — visually check both lamps before recording.",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Record white point",exact:true}).click();
+    await page.getByText("white anchors: 1",{exact:false}).waitFor();
+    const white=await page.evaluate(()=>window.calibrationCalls.at(-1));
+    assert.deepEqual(white.targets.a,{kelvin:3000,brightness:.5});
+    assert.deepEqual(white.targets.b,{rgb:[240,245,255],brightness:.5});
     await page.getByRole("button",{name:"Stop show",exact:true}).click();
     await page.getByText("No active shows.",{exact:false}).waitFor();
     assert.deepEqual(errors,[]);

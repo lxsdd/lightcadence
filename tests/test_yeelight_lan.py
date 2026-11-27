@@ -171,6 +171,21 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.close()
 
+    async def test_explicit_kelvin_frame_uses_native_tcp_and_range(self):
+        from types import SimpleNamespace
+        from engine.lightcadence_engine.effects import KelvinTarget
+        binding = self.dual_binding()
+        authority = YeelightLanStatePort([binding], timeout=.5)
+        adapter = YeelightTcpOutput(binding.profile, authority, lambda: 0.)
+        try:
+            await adapter.acquire()
+            with self.assertRaises(LanStateError):
+                await adapter.send_frame(SimpleNamespace(device_id="dual", target=KelvinTarget(1,1,1,.5,2000)))
+            await adapter.send_frame(SimpleNamespace(device_id="dual", target=KelvinTarget(1,1,1,.5,3500)))
+            self.assertEqual(self.properties[:4], ["on","50","3500","2"])
+            self.assertIn(("set_scene", ["ct",3500,50]), self.commands)
+        finally: adapter.close()
+
     async def test_white_output_and_exact_ct_restore(self):
         self.properties = ["on", "60", "3000", "2", "0", "0"]
         runtime = compose_lan_candidate([self.ct_binding()], enabled=True, timeout=.5)

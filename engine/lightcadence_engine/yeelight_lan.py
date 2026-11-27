@@ -300,7 +300,16 @@ class YeelightTcpOutput:
         await self.maintain()
         if frame.device_id != self.profile.device_id:
             raise LanStateError("frame does not match enrolled device")
-        if self.profile.white_kelvin is None:
+        from .effects import KelvinTarget
+        if isinstance(frame.target, KelvinTarget):
+            t = frame.target
+            p = self.profile
+            if p.ct_min_kelvin is None or not p.ct_min_kelvin <= t.kelvin <= p.ct_max_kelvin:
+                raise LanStateError("native Kelvin frame outside enrolled range")
+            level = round(100 * t.brightness)
+            method, params = (("set_scene", ["ct", t.kelvin, level]) if level
+                              else ("set_power", ["off", "sudden", 0]))
+        elif self.profile.white_kelvin is None:
             method, params = "set_scene", scene_parameters(frame.target)[:3]
         else:
             # Project linear RGB intensity onto a white-only channel. No invented RGB capability.

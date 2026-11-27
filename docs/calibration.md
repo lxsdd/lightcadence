@@ -25,9 +25,19 @@ Comparison changes are raw; target acceptance is not optical feedback. Use
 several white, warm and saturated color anchors and several brightness levels.
 Profile library must be configured persistent for use across restart.
 
-Initial candidate only supports RGB comparison including RGB-projected warm
-white on RGB lamps; native CT comparison output and per-Kelvin correction curves, multi-client draft
-recovery, colorimeter support and actual hardware acceptance remain open.
+Explicit native Kelvin reference comparison uses an enrolled Yeelight TCP
+profile with a verified range. Compare against another native TCP Kelvin lamp
+or any supported RGB lamp. Record multiple white anchors (nominal Kelvin →
+native Kelvin or RGB8 command), in addition to brightness and colour anchors.
+White anchor curves are interpolated in Kelvin or linear RGB respectively,
+never extrapolated. RGB-only white projection requires recorded anchors; no
+guessed Kelvin-to-RGB formula. Native TCP output checks the enrolled range before
+sending set_scene ct. Chroma remains RGB-only for frames. A common explicit
+Kelvin goal can be projected to HA color_temp_kelvin or recorded RGB/HSV
+targets without sending any device or scene command. Existing ordinary RGB
+effects remain RGB; explicit Kelvin authoring in scene/timeline effects,
+multi-client draft recovery, colorimeter support and actual hardware acceptance
+remain open.
 Explicit dual-mode Yeelight profiles can capture and restore either native RGB
 or CT state while the current comparison output still uses RGB. Set both
 ct_min_kelvin and ct_max_kelvin, omit white_kelvin, and use only owner-verified
@@ -38,4 +48,4 @@ to alter hidden attributes; an unconfirmed restore retains ownership. No househo
 
 ## Read-only native HA target proposals
 
-The physical authenticated command calibration_project uses the current library revision and engine instance fence. It accepts explicit nominal RGB8/brightness targets, applies the same renderer correction and uses the existing native quantization (Yeelight RGB/percent; Tuya HSV/value). The panel shows proposed HA entities JSON from a common goal or from inspected native scene targets. No scene is activated, created or modified. Existing scene targets may already include corrections: never apply a second correction without review. HA integration color-mode conversion and physical fidelity need acceptance; non-RGB/zero targets are rejected. The copied proposal is not a live snapshot of any later scene or profile edits.
+The physical authenticated command calibration_project uses the current library revision and engine instance fence. It accepts explicit nominal RGB8/brightness targets, applies the same renderer correction and uses the existing native quantization (Yeelight RGB/percent; Tuya HSV/value). The panel shows proposed HA entities JSON from a common goal or from inspected native scene targets. No scene is activated, created or modified. Existing scene targets may already include corrections: never apply a second correction without review. HA integration color-mode conversion and physical fidelity need acceptance; unsupported/zero targets are rejected. The copied proposal is not a live snapshot of any later scene or profile edits.

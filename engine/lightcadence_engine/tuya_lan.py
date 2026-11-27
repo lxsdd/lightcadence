@@ -249,6 +249,9 @@ class TuyaOutput:
         await self.maintain()
         if frame.device_id != self.profile.device_id:
             raise TuyaError("frame does not match enrolled device")
+        from .effects import KelvinTarget
+        if isinstance(frame.target, KelvinTarget):
+            raise TuyaError("native Kelvin output unsupported")
         b = self.authority.binding(self.profile)
         state = project_state(DeviceState(True, frame.target))
         values = (_commands(b, state) if int(state.native_hsv[8:], 16)

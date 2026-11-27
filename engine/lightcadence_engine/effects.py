@@ -39,6 +39,18 @@ class LightTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class KelvinTarget(LightTarget):
+    """Explicit white target; never infer Kelvin from arbitrary RGB."""
+    kelvin: int
+
+    def __post_init__(self):
+        LightTarget.__post_init__(self)
+        if (type(self.kelvin) is not int or not 1700 <= self.kelvin <= 6500
+                or (self.red, self.green, self.blue) != (1, 1, 1)):
+            raise ValueError("invalid explicit white target")
+
+
+@dataclass(frozen=True, slots=True)
 class Effect:
     kind: EffectKind
     period_seconds: float = 4.0

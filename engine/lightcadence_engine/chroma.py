@@ -30,7 +30,8 @@ def _srgb(value):
 
 def scene_parameters(target: LightTarget) -> list:
     """Initial RGB/brightness mapping; calibration on physical devices pending."""
-    if not isinstance(target, LightTarget):
+    from .effects import KelvinTarget
+    if not isinstance(target, LightTarget) or isinstance(target, KelvinTarget):
         raise ValueError("invalid light target")
     red, green, blue = (round(255 * _srgb(x)) for x in
                         (target.red, target.green, target.blue))

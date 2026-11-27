@@ -121,7 +121,6 @@ class LightCadencePanel extends LitElement {
   }
   private accept(s: Snapshot) {
     const physical=this.catalog?.physical_output_enabled===true;
-    const white=this.catalog?.lights.find(l=>l.id===this.manualDevice)?.transport;
     if(s.schema_version!==1 || s.output_mode!==(physical?"physical_candidate":"preview") || s.physical_output_enabled!==physical || (physical && (s.hardware_qualified!==false || !Array.isArray(s.enrolled_devices)))) throw new Error("incompatible engine API");
     if(this.snapshot && this.snapshot.instance_id!==s.instance_id) {this.pendingStart=undefined;this.pendingManual=undefined;this.nativeInspection=undefined;this.nativeFence=undefined;}
     this.snapshot=s;
@@ -337,6 +336,7 @@ class LightCadencePanel extends LitElement {
   }
   private name(id:string) {return this.catalog?.lights.find(l=>l.id===id)?.name ?? id;}
   render() {
+    const white=this.catalog?.lights.find(l=>l.id===this.manualDevice)?.transport;
     const physical=this.catalog?.physical_output_enabled===true;
     const active=this.snapshot?.sessions.filter(s=>s.phase!=="stopped")??[];
     const recovery=this.snapshot?.recovery_required??[];

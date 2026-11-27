@@ -76,7 +76,9 @@ it across acquisitions; it cannot measure external clients or other state reads.
 No automatic reconnect, quota bypass, Chroma fallback, or replay after a failed
 command. Identical quantized targets are coalesced. Original snapshot, ownership,
 recovery and independent stop readback stay on the existing shared coordinator.
-A TCP connection ACK is not measured light output. Only complete RGB-supported
-devices can be enrolled; white-only/CT-only modes and music mode are not supported
-by this path. The catalog labels the selected protocol and cadence. The faster
+A TCP connection ACK is not measured light output. Complete RGB or explicit native CT state can be enrolled using verified
+capability ranges; music/flow modes remain unsupported. For dual-mode lights,
+set both ct_min_kelvin and ct_max_kelvin and omit white_kelvin. Fixed-white
+profiles use white_kelvin; explicit Kelvin targets still require the enrolled
+native range. Chroma frames remain RGB-only. The catalog labels the selected protocol and cadence. The faster
 Chroma UDP route remains unchanged. Loopback tests are not hardware qualification.

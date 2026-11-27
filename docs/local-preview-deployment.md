@@ -91,4 +91,37 @@ library). HA configuration must select physical candidate mode and the same
 loopback port/token. The preparation and CI do not start this stack or send
 hardware commands. Stop/restore and inspect recovery before shutdown or
 rollback. See hardware-test-boundary.md for enrollment requirements. The
-calibration assistant is limited initially to RGB-capable enrolled lamps.
+calibration assistant supports enrolled RGB lamps and native Kelvin comparison
+on explicitly enrolled Yeelight TCP devices with verified CT ranges.
+
+## Read-only check before physical calibration
+
+From the verified hardware build directory, with the four owner-local Compose
+paths already set and the matching local image built, run as the configured
+container UID:
+
+```sh
+docker compose -f compose.yaml -f compose.hardware-test.yaml -f compose.library.yaml \
+  run --rm --no-deps --pull never lightcadence \
+  python -m engine.lightcadence_engine.server --check-config
+```
+
+This uses the production profile constructors, token and port validation, and
+the original recovery/library readers. It opens no device sockets or HTTP
+listener, takes no storage locks, and creates no journal/library files. It
+reports only mode, counts, library persistence and hardware_qualified=false;
+invalid input returns a nonzero exit with no secret, identifier or raw error.
+The persistence paths must exist and be accessible to UID 10001. Provision
+them separately before this check; Compose itself may create missing bind
+source directories, so do not invoke it until those paths exist. A nonzero
+recovery count requires inspection before an upgrade or new comparison; never
+delete the recovery journal. An unmatched count indicates changed identity
+binding. A persistent library and at least one native Kelvin device are
+necessary for the mixed Kelvin calibration workflow, not for all RGB shows.
+
+This advisory check does not acquire exclusive locks, prove actual write/fsync
+permission, test network reachability, resolve HA entity identity, or establish
+hardware support. It cannot guarantee that config files remain unchanged after
+checking. The normal runtime still validates the configuration and takes its
+own exclusive locks before any physical output. No installation or lamp
+operation is authorized by a successful check.

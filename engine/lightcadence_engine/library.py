@@ -52,19 +52,26 @@ class ProjectLibrary:
                 self.lock = os.open(self.directory / "library.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
                 fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self.path = self.directory / "library-v1.json"
-                if self.path.is_symlink():
-                    raise ValueError("invalid library path")
-                if self.path.exists():
-                    self.data = json.loads(self.path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
-                    # Additive v1 extension: only the exact old document shape is migrated.
-                    if isinstance(self.data, dict) and set(self.data) == {"schema_version", "revision", "zones", "scenes"}:
-                        self.data["floorplans"] = []
-                    if isinstance(self.data, dict) and set(self.data) == {"schema_version", "revision", "zones", "scenes", "floorplans"}:
-                        self.data["calibrations"] = []
-                    self.validate(self.data)
+                self.data = self.read_document(self.path)
             except BaseException:
                 self.close()
                 raise
+
+    @classmethod
+    def read_document(cls, path):
+        path = Path(path)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("invalid library path")
+        if not path.exists():
+            return {"schema_version": 1, "revision": 0, "zones": [], "scenes": [], "floorplans": [], "calibrations": []}
+        doc = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
+        # The original additive migrations are in memory only.
+        if isinstance(doc, dict) and set(doc) == {"schema_version", "revision", "zones", "scenes"}:
+            doc["floorplans"] = []
+        if isinstance(doc, dict) and set(doc) == {"schema_version", "revision", "zones", "scenes", "floorplans"}:
+            doc["calibrations"] = []
+        cls.validate(doc)
+        return doc
 
     @staticmethod
     def validate(doc):

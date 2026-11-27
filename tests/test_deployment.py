@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from engine.lightcadence_engine.deployment import configured_runtime
+from engine.lightcadence_engine.server import check_configuration
 from engine.lightcadence_engine.runtime import PhysicalRuntime, PreviewRuntime
 
 
@@ -94,3 +95,86 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         self.path.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
         with self.assertRaises(ValueError):
             configured_runtime(self.env)
+
+    async def test_read_only_preflight_for_physical_calibration(self):
+        root = self.path.parent
+        token = root / "token"
+        token.write_text("synthetic_" + "a" * 32)
+        library = root / "library"
+        library.mkdir()
+        self.save({**self.document, "devices": [{**self.device,
+            "transport": "yeelight_tcp", "interval": 1.,
+            "ct_min_kelvin": 2700, "ct_max_kelvin": 6500}]})
+        env = {**self.env, "LIGHTCADENCE_TOKEN_FILE": str(token),
+               "LIGHTCADENCE_LIBRARY_DIR": str(library)}
+        def snapshot():
+            return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        before = snapshot()
+        with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+            result = check_configuration(env)
+        self.assertEqual(result, {"mode": "physical_candidate", "persistent_library": True,
+            "devices": 1, "native_kelvin_devices": 1, "recovery_records": 0,
+            "unmatched_recovery_records": 0, "hardware_qualified": False})
+        self.assertEqual(snapshot(), before)
+        self.assertFalse((root / "recovery.lock").exists())
+        self.assertFalse((library / "library.lock").exists())
+        # The original startup accepts the very same document.
+        with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+            runtime = configured_runtime(env)
+            await runtime.close()
+        before = snapshot()
+        with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+            self.assertEqual(check_configuration(env), result)
+        self.assertEqual(snapshot(), before)
+
+    async def test_preflight_invalid_input_and_pending_recovery(self):
+        root = self.path.parent
+        token = root / "token"
+        token.write_text("synthetic_" + "a" * 32)
+        env = {**self.env, "LIGHTCADENCE_TOKEN_FILE": str(token)}
+        self.save(self.document)
+        for changes in ({"LIGHTCADENCE_PORT": "0"}, {"LIGHTCADENCE_LIBRARY_DIR": str(root)},
+                        {"LIGHTCADENCE_MODE": "preview"}, {"LIGHTCADENCE_DEVICE_FILE": str(root)}):
+            with self.assertRaises(ValueError):
+                check_configuration({**env, **changes})
+        self.save({**self.document, "devices": [self.device, self.device]})
+        with self.assertRaises(ValueError):
+            check_configuration(env)
+        self.save(self.document)
+        journal = root / "recovery-v1.json"
+        record = {"id": "synthetic-record", "binding": "old-binding",
+                  "original": {"power": True, "target": {"red": 1, "green": 0, "blue": 0, "brightness": .5}},
+                  "policy": "restore"}
+        journal.write_text(json.dumps({"schema_version": 1, "records": {"synthetic": record}}))
+        before = journal.read_bytes()
+        with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+            result = check_configuration(env)
+        self.assertEqual(result["recovery_records"], 1)
+        self.assertEqual(result["unmatched_recovery_records"], 1)
+        self.assertNotIn("synthetic-record", json.dumps(result))
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertFalse((root / "recovery.lock").exists())
+        journal.write_text("invalid json")
+        with self.assertRaises(ValueError):
+            check_configuration(env)
+        token.write_text("too-short")
+        with self.assertRaises(ValueError):
+            check_configuration(env)
+        self.assertFalse((root / "recovery.lock").exists())
+
+    async def test_preview_preflight_rejects_corrupt_library_without_mutation(self):
+        root = self.path.parent
+        token = root / "token"
+        token.write_text("synthetic_" + "a" * 32)
+        env = {"LIGHTCADENCE_TOKEN_FILE": str(token), "LIGHTCADENCE_LIBRARY_DIR": str(root)}
+        library = root / "library-v1.json"
+        old = b'{"schema_version":1,"revision":0,"zones":[],"scenes":[]}'
+        library.write_bytes(old)
+        result = check_configuration(env)
+        self.assertEqual(result["mode"], "preview")
+        self.assertTrue(result["persistent_library"])
+        self.assertEqual(library.read_bytes(), old)
+        library.write_text('{"schema_version":2}')
+        with self.assertRaises(ValueError):
+            check_configuration(env)
+        self.assertFalse((root / "library.lock").exists())

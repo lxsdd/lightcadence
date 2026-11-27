@@ -1,4 +1,5 @@
 """Authenticated loopback-only engine API, version 1."""
+import argparse
 import asyncio
 import hmac
 import json
@@ -10,7 +11,7 @@ from aiohttp import web
 
 from .runtime import PhysicalRuntime, PreviewRuntime, fields
 from .audio import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE
-from .deployment import configured_runtime
+from .deployment import configured_runtime, check_local_configuration, readable_file
 from .sessions import Conflict, StaleRevision
 
 RUNTIME = web.AppKey("runtime", PreviewRuntime)
@@ -129,12 +130,34 @@ def create_app(token, runtime=None):
     return app
 
 
-def main():
-    # File supplied by the local owner, never a repository secret or CLI argument.
-    token = Path(os.environ["LIGHTCADENCE_TOKEN_FILE"]).read_text(encoding="ascii").strip()
-    port = int(os.environ.get("LIGHTCADENCE_PORT", "17842"))
+def local_credentials(env):
+    token = readable_file(env["LIGHTCADENCE_TOKEN_FILE"]).read_text(encoding="ascii").strip()
+    if not valid_token(token):
+        raise ValueError("configure a local random token of at least 32 URL-safe characters")
+    port = int(env.get("LIGHTCADENCE_PORT", "17842"))
     if not 1 <= port <= 65535:
         raise ValueError("invalid local port")
+    return token, port
+
+
+def check_configuration(env):
+    local_credentials(env)
+    return check_local_configuration(env)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-config", action="store_true", help="Read-only local configuration check; no engine or device startup")
+    args = parser.parse_args()
+    if args.check_config:
+        try:
+            result = check_configuration(os.environ)
+        except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError):
+            print(json.dumps({"configuration_valid": False, "hardware_qualified": False}))
+            raise SystemExit(1) from None
+        print(json.dumps({"configuration_valid": True, **result}, sort_keys=True))
+        return
+    token, port = local_credentials(os.environ)
     web.run_app(create_app(token, configured_runtime(os.environ)), host="127.0.0.1", port=port, access_log=None, print=None)
 
 

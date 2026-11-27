@@ -35,11 +35,11 @@ guessed Kelvin-to-RGB formula. Native TCP output checks the enrolled range befor
 sending set_scene ct. Chroma remains RGB-only for frames. A common explicit
 Kelvin goal can be projected to HA color_temp_kelvin or recorded RGB/HSV
 targets without sending any device or scene command. Existing ordinary RGB
-effects remain RGB; explicit Kelvin authoring in scene/timeline effects,
-unsaved multi-client profile draft recovery, colorimeter support and actual hardware acceptance
-remain open.
+effects remain RGB; explicit Kelvin scenes and timeline clips are supported
+as described below. Unsaved multi-client profile draft recovery, colorimeter
+support and actual hardware acceptance remain open.
 Explicit dual-mode Yeelight profiles can capture and restore either native RGB
-or CT state while the current comparison output still uses RGB. Set both
+or CT state; normal TCP can also output explicit native Kelvin comparisons. Set both
 ct_min_kelvin and ct_max_kelvin, omit white_kelvin, and use only owner-verified
 capabilities/range. Both native properties are requested together, and only
 the active mode is decoded. Unsupported or incomplete state is rejected.

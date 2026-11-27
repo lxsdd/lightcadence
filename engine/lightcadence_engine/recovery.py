@@ -28,22 +28,27 @@ class RecoveryJournal:
             self._lock = os.open(self.directory / "recovery.lock",
                                  os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if self.path.is_symlink():
-                raise ValueError("invalid recovery journal")
-            if self.path.exists():
-                raw = json.loads(self.path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
-                if not isinstance(raw, dict) or set(raw) != {"schema_version", "records"} or type(raw["schema_version"]) is not int or raw["schema_version"] != 1 or not isinstance(raw["records"], dict):
-                    raise ValueError("invalid recovery journal")
-                self.records = raw["records"]
-                for device, record in self.records.items():
-                    self._validate(device, record)
-            else:
-                self.records = {}
+            self.records = self.read_records(self.path)
+            if not self.path.exists():
                 self._save({})
             self.recovery = set(self.records)
         except BaseException:
             self.close()
             raise
+
+    @classmethod
+    def read_records(cls, path):
+        path = Path(path)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("invalid recovery journal")
+        if not path.exists():
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
+        if not isinstance(raw, dict) or set(raw) != {"schema_version", "records"} or type(raw["schema_version"]) is not int or raw["schema_version"] != 1 or not isinstance(raw["records"], dict):
+            raise ValueError("invalid recovery journal")
+        for device, record in raw["records"].items():
+            cls._validate(device, record)
+        return raw["records"]
 
     @staticmethod
     def _validate(device, record):

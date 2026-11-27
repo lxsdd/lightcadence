@@ -173,7 +173,9 @@ async def ws_catalog(hass, connection, msg):
             connection.send_error(msg["id"], exc.code, "LightCadence engine request failed")
             return
         enrolled = set(state["enrolled_devices"])
-        lights = [dict(light, physical_output_enabled=True) for light in lights if light["id"] in enrolled]
+        transports = state.get("device_transports", {})
+        lights = [dict(light, physical_output_enabled=True, transport=transports.get(light["id"]))
+                  for light in lights if light["id"] in enrolled]
     connection.send_result(msg["id"], {
         "schema_version": 1,
         "entries": sorted(clients),

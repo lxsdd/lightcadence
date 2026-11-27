@@ -61,3 +61,22 @@ A binding change/corrupt journal needs investigation rather than a blind
 reset. Crash/power-loss durability depends on the actual local filesystem.
 No automatic restart, physical hardware proof or protection against
 external writers is implied.
+
+## Explicit normal Yeelight TCP output
+
+The optional per-device `transport` field is `chroma_v2` (legacy default) or
+`yeelight_tcp`. Normal TCP uses the configured `tcp_port`, rejects a
+`chroma_port`, and requires an interval of at least one second. This is a
+protocol-specific cadence, not a limit on the renderer or other devices.
+The public Yeelight WiFi Light Inter-Operation Specification states 60 command
+messages/minute per TCP connection, 144/minute across a device, and four
+concurrent TCP connections (https://www.yeelight.com/download/Yeelight_Inter-Operation_Spec.pdf).
+The output path additionally tracks its own rolling 60-command budget, retaining
+it across acquisitions; it cannot measure external clients or other state reads.
+No automatic reconnect, quota bypass, Chroma fallback, or replay after a failed
+command. Identical quantized targets are coalesced. Original snapshot, ownership,
+recovery and independent stop readback stay on the existing shared coordinator.
+A TCP connection ACK is not measured light output. Only complete RGB-supported
+devices can be enrolled; white-only/CT-only modes and music mode are not supported
+by this path. The catalog labels the selected protocol and cadence. The faster
+Chroma UDP route remains unchanged. Loopback tests are not hardware qualification.

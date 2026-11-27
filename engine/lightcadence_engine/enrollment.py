@@ -27,6 +27,7 @@ class ChromaProfile:
     host: str
     interval: float
     port: int = 55444
+    transport: str = "chroma_v2"
 
     def __post_init__(self):
         if any(not isinstance(x, str) or not x.strip() for x in
@@ -35,6 +36,10 @@ class ChromaProfile:
         if (isinstance(self.interval, bool) or not isinstance(self.interval, (int, float))
                 or not isfinite(self.interval) or self.interval < 0):
             raise ValueError("invalid device cadence")
+        if not isinstance(self.host, str) or self.transport not in ("chroma_v2", "yeelight_tcp"):
+            raise ValueError("explicit supported local transport required")
+        if self.transport == "yeelight_tcp" and self.interval < 1.0:
+            raise ValueError("normal Yeelight TCP requires at least one second between frame attempts")
         # Reuse original endpoint validation; constructing an adapter opens no socket.
         ChromaV2Adapter(self.device_id, self.host, self.port)
 
@@ -58,11 +63,15 @@ class StatePort(Protocol):
 
 
 class ProfiledChroma:
-    def __init__(self, profile, state_port, clock):
+    def __init__(self, profile, state_port, clock, transport_factory=None):
         self.profile = profile
         self.state_port = state_port
-        self.transport = ChromaV2Adapter(profile.device_id, profile.host,
-                                         profile.port, clock=clock)
+        if transport_factory is None:
+            if profile.transport != "chroma_v2":
+                raise ValueError("explicit transport composition required")
+            self.transport = ChromaV2Adapter(profile.device_id, profile.host, profile.port, clock=clock)
+        else:
+            self.transport = transport_factory(profile, clock)
 
     async def observe(self):
         p = self.profile
@@ -101,7 +110,8 @@ class PhysicalSessions:
     A failed batch publishes no session and closes all acquired local sockets.
     External clients and process crashes are not covered by these reservations.
     """
-    def __init__(self, profiles, state_port: StatePort, *, enabled=False, clock=monotonic, journal=None):
+    def __init__(self, profiles, state_port: StatePort, *, enabled=False, clock=monotonic, journal=None,
+                 transport_factory=None):
         if enabled is not True:
             raise ValueError("physical enrollment requires explicit opt-in")
         profiles = tuple(profiles)
@@ -112,7 +122,7 @@ class PhysicalSessions:
             if len({key(p) for p in profiles}) != len(profiles):
                 raise ValueError("duplicate device identity, HA reference or endpoint")
         self.manager = SessionManager(clock)
-        self._adapters = {p.device_id: ProfiledChroma(p, state_port, clock) for p in profiles}
+        self._adapters = {p.device_id: ProfiledChroma(p, state_port, clock, transport_factory) for p in profiles}
         self.journal = journal
         self.output = OutputCoordinator(self.manager, {
             d: a.output_profile(lambda d=d: self._release(d)) for d, a in self._adapters.items()}, clock)

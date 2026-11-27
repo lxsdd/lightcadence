@@ -6,7 +6,7 @@ import unittest
 from engine.lightcadence_engine.enrollment import ChromaProfile
 from engine.lightcadence_engine.yeelight_lan import (
     LanBinding, LanStateError, YeelightLanStatePort, compose_lan_candidate,
-    _decode,
+    _decode, YeelightTcpOutput,
 )
 
 
@@ -93,6 +93,78 @@ class LanTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
             self.handlers.discard(task)
+
+    def tcp_binding(self):
+        p = ChromaProfile("tcp-test", "tcp-ha-test", "synthetic", "1", "127.0.0.1",
+                          1.0, self.tcp_port, "yeelight_tcp")
+        return LanBinding(p, self.lan_id, self.tcp_port,
+                          self.discovery.get_extra_info("sockname")[1])
+
+    async def test_normal_tcp_original_runtime_restore_and_no_udp(self):
+        runtime = compose_lan_candidate([self.tcp_binding()], enabled=True, timeout=.5)
+        try:
+            result = await runtime.command({"op": "start", "request_id": "tcp", "zone_id": "zone",
+                "devices": ["tcp-test"], "effect": {"kind": "static", "color": [0,0,1], "brightness": .8}})
+            await runtime.physical.output.drain()
+            self.assertEqual(self.properties[2], "255")
+            self.assertEqual(self.chroma_messages, [])
+            self.assertEqual(runtime.state()["device_transports"]["tcp-test"]["kind"], "yeelight_tcp")
+            self.assertEqual(self.connections, 2)  # snapshot and persistent output
+            session = result["sessions"][0]
+            end = await runtime.command({"op": "stop", "session_id": session["id"],
+                                         "revision": session["revision"]})
+            self.assertEqual(end["sessions"][0]["phase"], "stopped")
+            self.assertEqual(self.properties[2], "16711680")
+            self.assertIsNone(runtime.manager.owner("tcp-test"))
+        finally:
+            await runtime.close()
+
+    async def test_tcp_failure_does_not_reconnect_or_replay(self):
+        binding = self.tcp_binding()
+        authority = YeelightLanStatePort([binding], timeout=.5)
+        adapter = YeelightTcpOutput(binding.profile, authority, lambda: 0.)
+        from types import SimpleNamespace
+        from engine.lightcadence_engine.effects import LightTarget
+        frame = SimpleNamespace(device_id="tcp-test", target=LightTarget(0,0,1,.8))
+        try:
+            await adapter.acquire()
+            self.reject = True
+            with self.assertRaises(LanStateError):
+                await adapter.send_frame(frame)
+            self.reject = False
+            with self.assertRaises(LanStateError):
+                await adapter.send_frame(frame)
+            self.assertEqual(self.connections, 1)
+            self.assertEqual([m for m, _ in self.commands], ["set_scene"])
+        finally:
+            adapter.close()
+
+    async def test_tcp_quota_and_identical_target_coalescing(self):
+        binding = self.tcp_binding()
+        authority = YeelightLanStatePort([binding], timeout=.5)
+        now = [0.]
+        adapter = YeelightTcpOutput(binding.profile, authority, lambda: now[0])
+        from types import SimpleNamespace
+        from engine.lightcadence_engine.effects import LightTarget
+        a = SimpleNamespace(device_id="tcp-test", target=LightTarget(1,0,0,.5))
+        b = SimpleNamespace(device_id="tcp-test", target=LightTarget(0,0,1,.5))
+        try:
+            await adapter.acquire()
+            for index in range(60):
+                now[0] = index * .9
+                frame = a if index % 2 == 0 else b
+                await adapter.send_frame(frame)
+                await adapter.send_frame(frame)
+            self.assertEqual(len(self.commands), 60)
+            now[0] = 59.
+            with self.assertRaises(LanStateError):
+                await adapter.send_frame(a)
+            self.assertEqual(len(self.commands), 60)
+            now[0] = 60.
+            await adapter.send_frame(a)
+            self.assertEqual(len(self.commands), 61)
+        finally:
+            adapter.close()
 
     async def test_directed_identity_and_fresh_rgb(self):
         original = await self.port.read(self.profile)

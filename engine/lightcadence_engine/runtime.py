@@ -194,13 +194,15 @@ class PhysicalRuntime(PreviewRuntime):
     Deployment requires explicit local configuration; hardware remains unqualified.
     """
 
-    def __init__(self, profiles, state_port, *, enabled=False, clock=monotonic, journal=None):
+    def __init__(self, profiles, state_port, *, enabled=False, clock=monotonic, journal=None,
+                 transport_factory=None):
         if enabled is not True:
             raise ValueError("physical candidate requires explicit opt-in")
         self.clock = clock
         self.instance_id = str(uuid4())
         profiles = tuple(profiles)
-        self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock, journal=journal)
+        self.physical = PhysicalSessions(profiles, state_port, enabled=True, clock=clock, journal=journal,
+                                         transport_factory=transport_factory)
         self.manager = self.physical.manager
         self.library = ProjectLibrary()
         self.scene_launches = SceneLaunches()
@@ -211,6 +213,7 @@ class PhysicalRuntime(PreviewRuntime):
         self._manual = {}
         self._ending = {}
         self.enrolled_devices = tuple(sorted(p.device_id for p in profiles))
+        self.device_transports = {p.device_id: {"kind": p.transport, "interval_seconds": p.interval} for p in profiles}
 
     def tick(self):
         if self._closing:
@@ -246,6 +249,7 @@ class PhysicalRuntime(PreviewRuntime):
         result = super().state()
         result.update(output_mode="physical_candidate", physical_output_enabled=True,
                       hardware_qualified=False, enrolled_devices=self.enrolled_devices,
+                      device_transports=self.device_transports,
                       transport_status={
                           device: asdict(status)
                           for device, status in self.physical.output.status.items()

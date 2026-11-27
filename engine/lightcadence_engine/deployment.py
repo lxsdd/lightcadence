@@ -43,10 +43,14 @@ def _configured_runtime(env):
         bindings = []
         for item in raw["devices"]:
             fields(item, ("ha_registry_id", "model", "firmware", "host", "interval", "lan_id"),
-                   ("chroma_port", "tcp_port", "discovery_port"))
+                   ("chroma_port", "tcp_port", "discovery_port", "transport"))
             # One stable registry identity in the engine and HA, not an IP or entity_id.
+            transport = item.get("transport", "chroma_v2")
+            if transport == "yeelight_tcp" and "chroma_port" in item:
+                raise ValueError("TCP profile must not configure a Chroma endpoint")
+            port = item.get("tcp_port", 55443) if transport == "yeelight_tcp" else item.get("chroma_port", 55444)
             p = ChromaProfile(item["ha_registry_id"], item["ha_registry_id"], item["model"],
-                              item["firmware"], item["host"], item["interval"], item.get("chroma_port", 55444))
+                              item["firmware"], item["host"], item["interval"], port, transport)
             bindings.append(LanBinding(p, item["lan_id"], item.get("tcp_port", 55443),
                                        item.get("discovery_port", 1982)))
         # Stable device/registry, model, firmware and protocol identity, not IP.

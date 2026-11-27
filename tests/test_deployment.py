@@ -38,6 +38,18 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(runtime.state()["hardware_qualified"])
             await runtime.close()
 
+    async def test_explicit_tcp_profile_requires_documented_cadence(self):
+        self.save({**self.document, "devices": [{**self.device, "transport": "yeelight_tcp", "interval": 1.0}]})
+        with patch("socket.socket", side_effect=AssertionError("unexpected network")):
+            runtime = configured_runtime(self.env)
+            self.assertEqual(runtime.state()["device_transports"]["synthetic"], {"kind": "yeelight_tcp", "interval_seconds": 1.0})
+            await runtime.close()
+        for changes in ({"transport": "yeelight_tcp", "interval": .02}, {"transport": "unknown"},
+                        {"transport": "yeelight_tcp", "interval": 1., "chroma_port": 55444}, {"host": 2130706433}):
+            self.save({**self.document, "devices": [{**self.device, **changes}]})
+            with self.assertRaises(ValueError):
+                configured_runtime(self.env)
+
     async def test_invalid_local_documents_fail_closed(self):
         for doc in ({**self.document, "owner_hardware_test": False},
                     {**self.document, "schema_version": True},

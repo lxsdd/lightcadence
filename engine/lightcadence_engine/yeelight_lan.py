@@ -7,13 +7,14 @@ Default deployment remains preview-only.
 """
 import asyncio
 from contextlib import asynccontextmanager
+from collections import deque
 from dataclasses import dataclass
 import json
 from math import isfinite
 import re
 import socket
 
-from .chroma import ChromaV2Adapter, _srgb, _unique_pairs
+from .chroma import ChromaV2Adapter, _srgb, _unique_pairs, scene_parameters
 from .effects import LightTarget, linear_channel
 from .enrollment import ChromaProfile, Observation
 from .runtime import PhysicalRuntime
@@ -40,6 +41,8 @@ class LanBinding:
                 or not isinstance(self.lan_id, str)
                 or not _ID.fullmatch(self.lan_id)):
             raise ValueError("explicit Yeelight protocol identity required")
+        if self.profile.transport == "yeelight_tcp" and self.profile.port != self.tcp_port:
+            raise ValueError("TCP output endpoint must match the state binding")
         for port in (self.tcp_port, self.discovery_port):
             ChromaV2Adapter(self.profile.device_id, self.profile.host, port)
 
@@ -150,7 +153,7 @@ class YeelightLanStatePort:
                 or not isfinite(timeout) or timeout <= 0):
             raise ValueError("invalid LAN bindings or timeout")
         for key in (lambda b: b.profile.device_id, lambda b: b.profile.ha_registry_id,
-                    lambda b: b.lan_id.lower(), lambda b: (b.profile.host, b.tcp_port)):
+                    lambda b: int(b.lan_id, 16), lambda b: (b.profile.host, b.tcp_port)):
             if len({key(b) for b in bindings}) != len(bindings):
                 raise ValueError("duplicate LAN binding")
         self._bindings = {b.profile.device_id: b for b in bindings}
@@ -214,6 +217,73 @@ class YeelightLanStatePort:
             return True
 
 
+class YeelightTcpOutput:
+    """Explicit normal-LAN output, not music mode or a Chroma fallback.
+
+    One persistent directed connection per acquired device. No per-frame state
+    query, no automatic reconnect or retry. The normal protocol has a 60/minute
+    per-connection command quota; reserve the full rolling minute before sending.
+    Other clients and state transactions also count toward the device-wide quota.
+    """
+    def __init__(self, profile, authority, clock):
+        if profile.transport != "yeelight_tcp":
+            raise ValueError("normal TCP profile required")
+        self.profile = profile
+        self.authority = authority
+        self.clock = clock
+        self.connection = None
+        self.attempts = deque()
+        self.last = None
+
+    def close(self):
+        if self.connection is not None:
+            # The output coordinator drains the in-flight request before close.
+            # No future command is scheduled here.
+            self.connection.writer.close()
+            self.connection = None
+        self.last = None
+
+    async def acquire(self):
+        if self.connection is not None:
+            raise LanStateError("TCP output already acquired")
+        binding = self.authority._binding(self.profile)
+        async with self.authority._locks[self.profile.device_id]:
+            async with asyncio.timeout(self.authority._timeout):
+                await self.authority._probe(binding)
+                reader, writer = await asyncio.open_connection(
+                    self.profile.host, binding.tcp_port, family=socket.AF_INET, limit=8192)
+                self.connection = _Connection(reader, writer)
+        self.last = None
+        # Keep the rolling local attempt history across acquisitions; never
+        # treat reconnect as a way to bypass command quotas.
+
+    async def maintain(self):
+        if self.connection is None or self.connection.writer.is_closing():
+            raise LanStateError("TCP output unavailable; explicit stop required")
+
+    async def send_frame(self, frame):
+        await self.maintain()
+        if frame.device_id != self.profile.device_id:
+            raise LanStateError("frame does not match enrolled device")
+        params = scene_parameters(frame.target)[:3]
+        if params == self.last:
+            return
+        now = self.clock()
+        while self.attempts and now - self.attempts[0] >= 60.0:
+            self.attempts.popleft()
+        if len(self.attempts) >= 60:
+            raise LanStateError("normal TCP local command quota reached")
+        self.attempts.append(now)
+        try:
+            async with asyncio.timeout(self.authority._timeout):
+                await self.connection.apply("set_scene", params)
+        except BaseException:
+            # A failed/uncertain command is never replayed or reconnected.
+            self.close()
+            raise
+        self.last = params
+
+
 def compose_lan_candidate(bindings, *, enabled=False, timeout=2.0, journal=None):
     """Explicit composition for future owner-approved use; opens no sockets.
 
@@ -223,4 +293,9 @@ def compose_lan_candidate(bindings, *, enabled=False, timeout=2.0, journal=None)
         raise ValueError("physical candidate requires explicit opt-in")
     bindings = tuple(bindings)
     port = YeelightLanStatePort(bindings, timeout=timeout)
-    return PhysicalRuntime([b.profile for b in bindings], port, enabled=True, journal=journal)
+    def transport(profile, clock):
+        if profile.transport == "yeelight_tcp":
+            return YeelightTcpOutput(profile, port, clock)
+        return ChromaV2Adapter(profile.device_id, profile.host, profile.port, clock=clock)
+    return PhysicalRuntime([b.profile for b in bindings], port, enabled=True, journal=journal,
+                           transport_factory=transport)

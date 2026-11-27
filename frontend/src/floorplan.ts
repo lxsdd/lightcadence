@@ -17,7 +17,7 @@ const kinds:Record<string,string>={room:"Room outline",zone:"Functional zone",fu
 
 class FloorplanEditor extends LitElement {
   static properties={library:{attribute:false},lights:{attribute:false},disabled:{type:Boolean},targetColors:{attribute:false},instanceId:{attribute:false},
-    draft:{state:true},selected:{state:true},planId:{state:true},kind:{state:true},featureName:{state:true},device:{state:true},zone:{state:true},points:{state:true},snap:{state:true},message:{state:true},dirty:{state:true}};
+    draft:{state:true},selected:{state:true},planId:{state:true},kind:{state:true},featureName:{state:true},device:{state:true},zone:{state:true},points:{state:true},snap:{state:true},message:{state:true},dirty:{state:true},zoom:{state:true},viewX:{state:true},viewY:{state:true},panMode:{state:true},showGrid:{state:true}};
   declare library?:Library;
   declare lights:Light[];
   declare disabled:boolean;
@@ -34,6 +34,12 @@ class FloorplanEditor extends LitElement {
   declare snap:number;
   declare message:string;
   declare dirty:boolean;
+  declare zoom:number;
+  declare viewX:number;
+  declare viewY:number;
+  declare panMode:boolean;
+  declare showGrid:boolean;
+  private panDrag?:{pointer:number;start:DOMPoint;inverse:DOMMatrix;x:number;y:number};
   private baseRevision=-1;
   private baseInstance="";
   private undoStack:Draft[]=[];
@@ -41,14 +47,14 @@ class FloorplanEditor extends LitElement {
   private drag?:{id:string;index:number;pointer:number;before:Draft};
   constructor(){
     super();this.lights=[];this.disabled=false;this.targetColors={};this.instanceId="";
-    this.draft=blank();this.planId="";this.selected="";this.kind="room";this.featureName="";this.device="";this.zone="";this.points=[];this.snap=.1;this.message="";this.dirty=false;
+    this.draft=blank();this.planId="";this.selected="";this.kind="room";this.featureName="";this.device="";this.zone="";this.points=[];this.snap=.1;this.message="";this.dirty=false;this.zoom=1;this.viewX=0;this.viewY=0;this.panMode=false;this.showGrid=true;
   }
   private load(id:string){
     const p=this.library?.floorplans?.find(p=>p.id===id);
     if(id&&!p)return;
     if(this.dirty||this.points.length){this.message="Discard draft first before loading another floor.";return;}
     this.draft=p?clone({name:p.name,width:p.width,height:p.height,features:p.features}):blank();
-    this.planId=id;this.baseRevision=this.library?.revision??-1;this.baseInstance=this.instanceId;this.selected="";this.points=[];this.undoStack=[];this.redoStack=[];this.dirty=false;this.message="";
+    this.planId=id;this.baseRevision=this.library?.revision??-1;this.baseInstance=this.instanceId;this.selected="";this.points=[];this.undoStack=[];this.redoStack=[];this.dirty=false;this.message="";this.fit();this.panMode=false;
   }
   private change(next:Draft){
     if(this.disabled)return;
@@ -60,6 +66,26 @@ class FloorplanEditor extends LitElement {
     const value=from.pop();if(!value)return;
     to.push(clone(this.draft));this.draft=value;this.dirty=true;this.selected="";
   }
+  private view(){
+    const w=this.draft.width/this.zoom,h=this.draft.height/this.zoom;
+    return {w,h,x:Math.max(0,Math.min(this.draft.width-w,this.viewX)),y:Math.max(0,Math.min(this.draft.height-h,this.viewY))};
+  }
+  private fit(){this.zoom=1;this.viewX=0;this.viewY=0;}
+  private setView(x:number,y:number){
+    this.viewX=x;this.viewY=y;
+    const v=this.view();this.viewX=v.x;this.viewY=v.y;
+  }
+  private magnify(factor:number){
+    if(this.drag||this.panDrag)return;
+    const old=this.view();
+    this.zoom=Math.max(1,Math.min(32,this.zoom*factor));
+    const next=this.view();
+    this.setView(old.x+(old.w-next.w)/2,old.y+(old.h-next.h)/2);
+  }
+  private nudge(dx:number,dy:number){
+    if(this.drag||this.panDrag)return;
+    const v=this.view();this.setView(v.x+dx*v.w/4,v.y+dy*v.h/4);
+  }
   private point(e:PointerEvent):Point|undefined{
     const canvas=this.renderRoot.querySelector("svg");
     const m=canvas?.getScreenCTM();if(!m)return;
@@ -68,7 +94,15 @@ class FloorplanEditor extends LitElement {
     return [limit(v.x,this.draft.width),limit(v.y,this.draft.height)];
   }
   private draw(e:PointerEvent){
-    if(this.disabled||e.button!==0||this.drag)return;
+    if(e.button!==0||this.drag||this.panDrag)return;
+    if(this.panMode){
+      const canvas=e.currentTarget as SVGSVGElement;
+      const matrix=canvas.getScreenCTM();if(!matrix)return;
+      const inverse=matrix.inverse(),v=this.view();
+      this.panDrag={pointer:e.pointerId,start:new DOMPoint(e.clientX,e.clientY).matrixTransform(inverse),inverse,x:v.x,y:v.y};
+      canvas.setPointerCapture(e.pointerId);return;
+    }
+    if(this.disabled)return;
     const p=this.point(e);if(!p)return;
     this.points=this.kind==="lamp"?[p]:[...this.points,p];
   }
@@ -80,16 +114,23 @@ class FloorplanEditor extends LitElement {
     this.change({...this.draft,features:[...this.draft.features,f]});this.selected=f.id;this.points=[];this.featureName="";this.message="";
   }
   private dragStart(e:PointerEvent,id:string,index:number){
-    e.stopPropagation();if(this.disabled||e.button!==0)return;
+    if(this.panMode)return;
+    e.stopPropagation();if(this.disabled||e.button!==0||this.drag||this.panDrag)return;
     this.drag={id,index,pointer:e.pointerId,before:clone(this.draft)};
     (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
   }
   private move(e:PointerEvent){
+    const pan=this.panDrag;
+    if(pan?.pointer===e.pointerId){
+      const p=new DOMPoint(e.clientX,e.clientY).matrixTransform(pan.inverse);
+      this.setView(pan.x+pan.start.x-p.x,pan.y+pan.start.y-p.y);return;
+    }
     const d=this.drag;if(!d||d.pointer!==e.pointerId)return;
     const p=this.point(e);if(!p)return;
     this.draft={...this.draft,features:this.draft.features.map(f=>f.id!==d.id?f:{...f,points:f.points.map((v,i)=>i===d.index?p:v)})};
   }
   private end(e:PointerEvent,cancel=false){
+    if(this.panDrag?.pointer===e.pointerId){this.panDrag=undefined;return;}
     const d=this.drag;if(!d||d.pointer!==e.pointerId)return;
     this.drag=undefined;
     const next=this.draft;this.draft=d.before;if(!cancel)this.change(next);
@@ -97,6 +138,22 @@ class FloorplanEditor extends LitElement {
   private vertex(id:string,index:number,axis:number,value:number){
     if(!Number.isFinite(value))return;
     this.change({...this.draft,features:this.draft.features.map(f=>f.id!==id?f:{...f,points:f.points.map((p,i)=>i!==index?p:axis===0?[value,p[1]]:[p[0],value])})});
+  }
+  private editVertex(id:string,index:number,insert:boolean){
+    const f=this.draft.features.find(g=>g.id===id);
+    if(!f||lamp(f.kind)&&f.kind==="lamp")return;
+    const minimum=polygon(f.kind)?3:2,points=clone(f.points);
+    if(insert){
+      const a=points[index],b=points[index+1]??(polygon(f.kind)?points[0]:undefined);
+      if(!a||!b)return;
+      const mid:Point=[a[0]+(b[0]-a[0])/2,a[1]+(b[1]-a[1])/2];
+      if((mid[0]===a[0]&&mid[1]===a[1])||(mid[0]===b[0]&&mid[1]===b[1]))return;
+      points.splice(index+1,0,mid);
+    }else{
+      if(points.length<=minimum)return;
+      points.splice(index,1);
+    }
+    this.change({...this.draft,features:this.draft.features.map(g=>g.id===id?{...g,points}:g)});
   }
   private save(remove=false){
     if(this.disabled||!this.library||this.library.fault||this.baseRevision!==this.library.revision||this.baseInstance!==this.instanceId){this.message="Library changed — discard and reload before saving.";return;}
@@ -109,7 +166,11 @@ class FloorplanEditor extends LitElement {
     const f=this.draft.features.find(x=>x.id===this.selected),w=this.draft.width,h=this.draft.height;
     const valid=Number.isFinite(w)&&Number.isFinite(h)&&w>0&&h>0;
     const pts=(p:Point[])=>p.map(v=>v.join(",")).join(" ");
-    const radius=valid?Math.min(w,h)/65:.1;
+    const view=this.view();
+    const radius=valid?Math.min(view.w,view.h)/65:.1;
+    const gridStep=valid?Math.max(this.snap||.1,Math.pow(10,Math.floor(Math.log10(Math.max(view.w,view.h)/20)))):1;
+    const gridId="floor-grid";
+
     return html`
       <div class="editor-controls">
         <label>Saved floor <select aria-label="Saved floor" .value=${this.planId} ?disabled=${this.disabled||this.dirty||!!this.points.length} @change=${(e:Event)=>this.load((e.target as HTMLSelectElement).value)}><option value="">New floor</option>${this.library?.floorplans?.map(p=>html`<option value=${p.id}>${p.name}</option>`)}</select></label>
@@ -124,8 +185,20 @@ class FloorplanEditor extends LitElement {
         <p>Tap or click vertices on the floor. Finish adds the shape to your draft. Select a saved shape below to move vertices.</p>
         <div class="buttons"><button ?disabled=${this.disabled||!this.points.length} @click=${()=>this.add()}>Finish geometry</button><button ?disabled=${this.disabled||!this.points.length} @click=${()=>this.points=this.points.slice(0,-1)}>Remove last point</button></div>
       </div>
-      ${valid?html`<svg aria-label="Floor drawing surface" viewBox=${"0 0 "+w+" "+h} @pointerdown=${this.draw} @pointermove=${this.move} @pointerup=${(e:PointerEvent)=>this.end(e)} @pointercancel=${(e:PointerEvent)=>this.end(e,true)}>
+      ${valid?html`
+      <div class="buttons" role="group" aria-label="Floor view controls">
+        <button aria-label="Zoom in" ?disabled=${this.zoom>=32} @click=${()=>this.magnify(2)}>Zoom +</button>
+        <button aria-label="Zoom out" ?disabled=${this.zoom<=1} @click=${()=>this.magnify(.5)}>Zoom −</button>
+        <button @click=${()=>this.fit()}>Fit floor</button>
+        <button aria-pressed=${String(this.panMode)} @click=${()=>{if(!this.drag&&!this.panDrag)this.panMode=!this.panMode;}}>Pan mode</button>
+        <button aria-pressed=${String(this.showGrid)} @click=${()=>this.showGrid=!this.showGrid}>Grid</button>
+        ${([[ -1,0,"Pan left"],[1,0,"Pan right"],[0,-1,"Pan up"],[0,1,"Pan down"]] as const).map(([x,y,label])=>html`<button aria-label=${label} ?disabled=${this.zoom<=1} @click=${()=>this.nudge(x,y)}>${label}</button>`)}
+      </div>
+      <p role="status">View ${Math.round(this.zoom*100)}% · ${this.panMode?"Pan: drag the view":"Draw: tap vertices"} · ${this.showGrid?"Grid "+gridStep.toPrecision(2)+" m":"Grid hidden"}</p>
+      <svg aria-label="Floor drawing surface" class=${this.panMode?"panning":""} style=${"aspect-ratio:"+w+"/"+h} viewBox=${[view.x,view.y,view.w,view.h].join(" ")} @pointerdown=${this.draw} @pointermove=${this.move} @pointerup=${(e:PointerEvent)=>this.end(e)} @pointercancel=${(e:PointerEvent)=>this.end(e,true)} @lostpointercapture=${(e:PointerEvent)=>this.end(e,true)}>
+        <defs><pattern id=${gridId} patternUnits="userSpaceOnUse" width=${gridStep} height=${gridStep}><path d=${"M"+gridStep+" 0H0V"+gridStep} fill="none" stroke="var(--divider-color,#8290a2)" stroke-opacity=".45" stroke-width=".75" vector-effect="non-scaling-stroke"/></pattern></defs>
         <rect width=${w} height=${h} fill="var(--primary-background-color,#202735)" stroke="var(--divider-color,#8290a2)" stroke-width=".025"/>
+        ${this.showGrid?svg`<rect width=${w} height=${h} fill=${"url(#"+gridId+")"} pointer-events="none"/>`:nothing}
         ${this.draft.features.map(g=>svg`<g class=${"geometry "+g.kind} pointer-events="none">
           ${g.kind==="lamp"?svg`<circle cx=${g.points[0][0]} cy=${g.points[0][1]} r=${radius*2} fill=${this.targetColors[g.device_id??""]??"var(--primary-color,#448bd0)"}/>`:polygon(g.kind)?svg`<polygon points=${pts(g.points)} vector-effect="non-scaling-stroke"/>`:svg`<polyline points=${pts(g.points)} vector-effect="non-scaling-stroke" style=${g.kind==="strip"?"stroke:"+(this.targetColors[g.device_id??""]??"var(--primary-color,#448bd0)"):""}/>`}
           ${g.points.length?svg`<text x=${g.points[0][0]} y=${g.points[0][1]+radius*3} font-size=${radius*2.5}>${g.name}</text>`:nothing}</g>`)}
@@ -134,14 +207,14 @@ class FloorplanEditor extends LitElement {
         ${f?.points.map((p,i)=>svg`<circle class="vertex" cx=${p[0]} cy=${p[1]} r=${radius*2} @pointerdown=${(e:PointerEvent)=>this.dragStart(e,f.id,i)}/>`)}
       </svg>`:html`<p role="alert">Enter positive floor dimensions.</p>`}
       <label>Selected geometry <select aria-label="Selected geometry" .value=${this.selected} @change=${(e:Event)=>this.selected=(e.target as HTMLSelectElement).value}><option value="">Select shape</option>${this.draft.features.map(g=>html`<option value=${g.id}>${g.name}</option>`)}</select></label>
-      ${f?html`<div class="vertices">${f.points.map((p,i)=>html`<div class="pair">${p.map((n,a)=>html`<label>Vertex ${i+1} ${a?"Y":"X"}<input aria-label=${"Vertex "+(i+1)+(a?" Y":" X")} type="number" step=".1" .value=${String(n)} ?disabled=${this.disabled} @change=${(e:Event)=>this.vertex(f.id,i,a,(e.target as HTMLInputElement).valueAsNumber)}></label>`)}</div>`)}</div><button ?disabled=${this.disabled} @click=${()=>{this.change({...this.draft,features:this.draft.features.filter(g=>g.id!==f.id)});this.selected="";}}>Delete geometry</button>`:nothing}
+      ${f?html`<label>Selected geometry name <input aria-label="Selected geometry name" .value=${f.name} ?disabled=${this.disabled} @change=${(e:Event)=>{const name=(e.target as HTMLInputElement).value.trim();if(name)this.change({...this.draft,features:this.draft.features.map(g=>g.id===f.id?{...g,name}:g)});}}></label><div class="vertices">${f.points.map((p,i)=>html`<div class="pair">${p.map((n,a)=>html`<label>Vertex ${i+1} ${a?"Y":"X"}<input aria-label=${"Vertex "+(i+1)+(a?" Y":" X")} type="number" step=".1" .value=${String(n)} ?disabled=${this.disabled} @change=${(e:Event)=>this.vertex(f.id,i,a,(e.target as HTMLInputElement).valueAsNumber)}></label>`)}${f.kind!=="lamp"?html`<div class="buttons"><button aria-label=${"Insert vertex after "+(i+1)} ?disabled=${this.disabled||(!polygon(f.kind)&&i===f.points.length-1)} @click=${()=>this.editVertex(f.id,i,true)}>Insert midpoint</button><button aria-label=${"Remove vertex "+(i+1)} ?disabled=${this.disabled||f.points.length<=(polygon(f.kind)?3:2)} @click=${()=>this.editVertex(f.id,i,false)}>Remove vertex</button></div>`:nothing}</div>`)}</div><button ?disabled=${this.disabled} @click=${()=>{this.change({...this.draft,features:this.draft.features.filter(g=>g.id!==f.id)});this.selected="";}}>Delete geometry</button>`:nothing}
       <div class="buttons"><button ?disabled=${this.disabled||!this.undoStack.length} @click=${()=>this.history(false)}>Undo</button><button ?disabled=${this.disabled||!this.redoStack.length} @click=${()=>this.history(true)}>Redo</button><button ?disabled=${this.disabled||!this.dirty} @click=${()=>this.save()}>Save floor</button><button ?disabled=${this.disabled||!this.planId||this.dirty} @click=${()=>this.save(true)}>Delete floor</button></div>
       <p role="status">${this.message|| (this.dirty?"Unsaved geometry":"No unsaved geometry")}</p>`;
   }
   static styles=css`
     :host{display:block;min-inline-size:0;color:var(--primary-text-color,#eef1f5)}
     *{box-sizing:border-box} .pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.buttons{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
-    label{display:block;margin:8px 0;min-inline-size:0} input,select,button{font:inherit;color:inherit;min-block-size:44px;min-inline-size:0;background:var(--secondary-background-color,#303948);border:1px solid var(--divider-color,#657080);border-radius:6px;padding:8px}input,select{inline-size:100%;display:block}button:disabled{opacity:.5}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--primary-color,#448bd0)}
+    label{display:block;margin:8px 0;min-inline-size:0} input,select,button{font:inherit;color:inherit;min-block-size:44px;min-inline-size:0;background:var(--secondary-background-color,#303948);border:1px solid var(--divider-color,#657080);border-radius:6px;padding:8px}input,select{inline-size:100%;display:block}button:disabled{opacity:.5}button[aria-pressed="true"]{border-color:var(--primary-color,#448bd0);background:var(--primary-color,#448bd0);color:var(--text-primary-color,#fff)}svg.panning,svg.panning .vertex{cursor:grab}svg.panning:active{cursor:grabbing}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--primary-color,#448bd0)}
     svg{display:block;inline-size:100%;min-block-size:180px;aspect-ratio:auto;touch-action:none;border:1px solid var(--divider-color,#657080);border-radius:8px} .geometry polygon{fill:var(--primary-color,#448bd0);fill-opacity:.13;stroke:var(--primary-color,#448bd0);stroke-width:1.5}.geometry.furniture polygon{fill:var(--secondary-text-color,#aab3c0);stroke:var(--secondary-text-color,#aab3c0)}.geometry.zone polygon{stroke-dasharray:5 4}.geometry polyline,.draft-line{fill:none;stroke:var(--primary-text-color,#eef1f5);stroke-width:2}.geometry.opening polyline,.geometry.effect_path polyline{stroke-dasharray:5 3}.geometry.strip polyline{stroke-width:5}.geometry text{fill:var(--primary-text-color,#eef1f5);pointer-events:none}.vertex{fill:var(--card-background-color,#202735);stroke:var(--primary-color,#448bd0);stroke-width:.03;cursor:grab}.draft-line{stroke:var(--primary-color,#448bd0);pointer-events:none}
   `;
 }

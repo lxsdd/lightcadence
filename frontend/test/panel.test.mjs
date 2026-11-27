@@ -540,6 +540,72 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.nativeCalls),[{type:"lightcadence/ha_scene_import",entry_id:"entry",scene_id:"native-a",fingerprint:"fingerprint",name:"Local copy",revision:0,instance_id:"native-import"}]);
     await page.close();
   });
+
+  await test("explicit Kelvin scene roundtrip and timeline editing in the real mobile panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    const errors=[];page.on("pageerror",e=>errors.push(e.message));
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.whiteCalls=[];
+      const state={schema_version:1,instance_id:"white-scene",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:0,zones:[],scenes:[],persistent:true,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.whiteCalls.push(structuredClone(p));
+          if(p.op==="library_save"){state.library[p.kind].push({...p.value,id:p.kind==="zones"?"zone1":"scene1",revision:1});state.library.revision++;}
+          if(p.op==="start"){state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];state.targets={a:{target:{red:1,green:1,blue:1,brightness:p.effect.brightness,...(p.effect.kind==="white"?{kelvin:p.effect.kelvin}:{})}}};}
+          if(p.op==="stop"){state.sessions=[];state.targets={};}
+        }
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("White zone");
+    await page.getByRole("checkbox").first().check();
+    await page.getByRole("button",{name:"Save new zone",exact:true}).click();
+    await page.getByLabel("Saved zone",{exact:true}).selectOption("zone1");
+    await page.getByLabel("Scene name",{exact:true}).fill("Warm scene");
+    await page.getByLabel("Effect",{exact:true}).selectOption("white");
+    const kelvin=page.getByLabel("White temperature (K)",{exact:true});
+    await kelvin.fill("7000");
+    assert.equal(await page.getByRole("button",{name:"Save new scene",exact:true}).isDisabled(),true);
+    assert.equal(await page.getByRole("button",{name:"Start preview",exact:true}).isDisabled(),true);
+    await kelvin.fill("3150");
+    await page.getByRole("button",{name:"Save new scene",exact:true}).click();
+    await page.getByLabel("Effect",{exact:true}).selectOption("scanner");
+    await page.getByLabel("Saved scene",{exact:true}).selectOption("scene1");
+    assert.equal(await page.getByLabel("Effect",{exact:true}).inputValue(),"white");
+    assert.equal(await kelvin.inputValue(),"3150");
+    await page.getByRole("button",{name:"Start preview",exact:true}).click();
+    await page.getByText("Lamp A · 3150 K",{exact:true}).waitFor();
+    const commands=await page.evaluate(()=>window.whiteCalls);
+    assert.equal(commands[1].value.effect.kelvin,3150);
+    assert.deepEqual(commands[1].value.effect.color,[1,1,1]);
+    assert.equal(commands[2].effect.kelvin,3150);
+    await page.getByRole("button",{name:"Stop preview",exact:true}).click();
+    await page.getByText("No active previews.",{exact:false}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("White timeline");
+    await page.getByRole("checkbox").first().check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByLabel("Clip effect",{exact:true}).selectOption("white");
+    await page.getByLabel("Clip Kelvin",{exact:true}).fill("3600");
+    await page.getByLabel("Clip Kelvin",{exact:true}).press("Tab");
+    await page.getByLabel("Clip effect",{exact:true}).selectOption("static");
+    assert.equal(await page.getByLabel("Clip Kelvin",{exact:true}).count(),0);
+    await page.getByLabel("Clip effect",{exact:true}).selectOption("white");
+    await page.getByLabel("Clip Kelvin",{exact:true}).fill("3700");
+    await page.getByLabel("Clip Kelvin",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Start preview",exact:true}).click();
+    await page.getByRole("heading",{name:"White timeline",exact:true}).waitFor();
+    const last=await page.evaluate(()=>window.whiteCalls.at(-1));
+    assert.equal(last.effect.tracks[0].clips[0].layer.effect.kelvin,3700);
+    assert.deepEqual(last.effect.tracks[0].clips[0].layer.effect.color,[1,1,1]);
+    assert.deepEqual(errors,[]);
+    await page.close();
+  });
   await test("calibration assistant compares and saves raw visual anchors on mobile",async()=>{
     const page=await browser.newPage({viewport:{width:390,height:844}});
     const errors=[];page.on("pageerror",e=>errors.push(e.message));

@@ -1,0 +1,10 @@
+# Explicit owner-approved test overlay; never used by the default Compose file.
+services:
+  lightcadence:
+    environment:
+      LIGHTCADENCE_MODE: physical_candidate
+      LIGHTCADENCE_DEVICE_FILE: /run/secrets/devices.json
+      LIGHTCADENCE_JOURNAL_DIR: /var/lib/lightcadence
+    volumes:
+      - "${LIGHTCADENCE_DEVICE_PATH:?Set the owner-local read-only device file}:/run/secrets/devices.json:ro"
+      - "${LIGHTCADENCE_JOURNAL_PATH:?Set a persistent owner-local journal directory}:/var/lib/lightcadence:rw"

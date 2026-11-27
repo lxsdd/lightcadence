@@ -1,0 +1,13 @@
+services:
+  lightcadence:
+    build: .
+    network_mode: host
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      LIGHTCADENCE_TOKEN_FILE: /run/secrets/engine_token
+      LIGHTCADENCE_PORT: "17842"
+    volumes:
+      - "${LIGHTCADENCE_TOKEN_PATH:?Set a local read-only token file path}:/run/secrets/engine_token:ro"

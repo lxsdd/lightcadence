@@ -1,0 +1,7 @@
+# Optional local persistence, separate from HA and the recovery journal.
+services:
+  lightcadence:
+    environment:
+      LIGHTCADENCE_LIBRARY_DIR: /var/lib/lightcadence/library
+    volumes:
+      - "${LIGHTCADENCE_LIBRARY_PATH:?Set owner-local library directory}:/var/lib/lightcadence/library:rw"

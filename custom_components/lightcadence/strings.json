@@ -1,0 +1,41 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to LightCadence",
+        "description": "Connect to the local engine. Only select physical candidate for a separately owner-authorized hardware test.",
+        "data": {
+          "port": "Local engine port",
+          "token": "Local engine token",
+          "physical_candidate": "Enable physical candidate (unqualified hardware test)"
+        }
+      }
+    },
+    "error": {
+      "invalid_config": "Invalid port or token format",
+      "invalid_auth": "Authentication failed",
+      "cannot_connect": "Cannot connect to the compatible local engine"
+    },
+    "abort": {
+      "already_configured": "The local engine is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Show switches",
+        "description": "Select saved non-audio scenes to expose as HA switches. Removing a switch never stops a show. Configure Google Home exposure separately.",
+        "data": {
+          "scene_switches": "Saved scenes"
+        }
+      }
+    },
+    "error": {
+      "invalid_scene_selection": "Select available saved scenes"
+    },
+    "abort": {
+      "preview_only": "Show switches require the explicitly enabled physical candidate",
+      "engine_unavailable": "Local engine unavailable"
+    }
+  }
+}

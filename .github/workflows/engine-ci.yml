@@ -1,0 +1,91 @@
+name: Engine CI
+on:
+  push:
+    branches: [main, 'work/**']
+    paths:
+      - 'frontend/**'
+      - 'engine/**'
+      - 'custom_components/**'
+      - 'tests/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose*.yaml'
+      - 'deployment/**'
+      - '.github/workflows/engine-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'engine/**'
+      - 'custom_components/**'
+      - 'tests/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose*.yaml'
+      - 'deployment/**'
+      - '.github/workflows/engine-ci.yml'
+permissions:
+  contents: read
+concurrency:
+  group: engine-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  engine-core:
+    name: engine-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact source checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Build and typecheck original Lit panel
+        run: |
+          cd frontend
+          npm install --no-audit --no-fund
+          npm run build
+      - name: Production panel desktop and mobile browser regressions
+        run: |
+          cd frontend
+          npx --no-install playwright install chromium
+          npm test
+      - name: Prepare and verify exact-source preview build (local only)
+        run: |
+          python3 -m unittest discover -s deployment -p 'test_*.py' -v
+          stage="$RUNNER_TEMP/lightcadence-preview"
+          python3 deployment/prepare_preview.py prepare --repo . --sha "$(git rev-parse HEAD)" --destination "$stage"
+          python3 deployment/prepare_preview.py verify "$stage"
+          cmp custom_components/lightcadence/frontend/panel.js "$stage/custom_components/lightcadence/frontend/panel.js"
+          LIGHTCADENCE_TOKEN_PATH="$RUNNER_TEMP/synthetic-token" docker compose -f "$stage/compose.yaml" config --quiet
+      - name: Prepare and verify explicit hardware candidate bundle (no device I/O)
+        run: |
+          stage="$RUNNER_TEMP/lightcadence-hardware"
+          python3 deployment/prepare_preview.py prepare --repo . --sha "$(git rev-parse HEAD)" --destination "$stage" --hardware-candidate
+          python3 deployment/prepare_preview.py verify "$stage"
+          cmp custom_components/lightcadence/frontend/panel.js "$stage/custom_components/lightcadence/frontend/panel.js"
+          cmp compose.hardware-test.yaml "$stage/compose.hardware-test.yaml"
+          LIGHTCADENCE_TOKEN_PATH="$RUNNER_TEMP/synthetic-token" LIGHTCADENCE_DEVICE_PATH="$RUNNER_TEMP/synthetic-devices" LIGHTCADENCE_JOURNAL_PATH="$RUNNER_TEMP/synthetic-journal" LIGHTCADENCE_LIBRARY_PATH="$RUNNER_TEMP/synthetic-library" docker compose -f "$stage/compose.yaml" -f "$stage/compose.hardware-test.yaml" -f "$stage/compose.library.yaml" config --quiet
+      - name: Build local engine container (no publish)
+        run: docker build -t lightcadence-ci "$RUNNER_TEMP/lightcadence-preview"
+      - name: Compile original engine and HA integration
+        run: python3 -m compileall -q engine custom_components tests
+      - name: Original engine and loopback HTTP positive and negative regressions
+        run: docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,mode=1777 --cap-drop ALL -v "$PWD/tests:/app/tests:ro" lightcadence-ci python -m unittest discover -s tests -v
+      - name: Pull versioned official HA runtime
+        run: |
+          docker pull ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f
+          docker image inspect --format '{{json .RepoDigests}}' ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f
+      - name: Real HA config flow and authenticated WebSocket regressions (no device I/O)
+        run: |
+          # HA initializes its native mDNS resolver even for loopback clients.
+          # An internal bridge supplies an interface without external routing.
+          network="lightcadence-ha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker network create --internal "$network"
+          trap 'docker network rm "$network" >/dev/null' EXIT
+          test "$(docker network inspect --format '{{.Internal}}' "$network")" = true
+          docker run --rm --network "$network" --cap-drop ALL --entrypoint python -e PYTHONPATH=/src -v "$PWD:/src:ro" ghcr.io/home-assistant/home-assistant:2026.11.2@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f /src/tests/ha_runtime.py

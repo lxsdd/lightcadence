@@ -1,0 +1,14 @@
+{
+  "domain": "lightcadence",
+  "name": "LightCadence",
+  "version": "0.1.0",
+  "documentation": "https://github.com/lxsdd/lightcadence",
+  "config_flow": true,
+  "dependencies": [
+    "websocket_api",
+    "panel_custom"
+  ],
+  "iot_class": "local_polling",
+  "requirements": [],
+  "codeowners": []
+}

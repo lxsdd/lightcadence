@@ -1,0 +1,110 @@
+set_rgb:
+  name: Set RGB and turn on
+  description: Cooperatively release one enrolled lamp from its show and apply an exact RGB state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+    rgb_color:
+      name: RGB colour
+      required: true
+      selector:
+        color_rgb:
+    brightness_pct:
+      name: Brightness
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+set_ct:
+  name: Set colour temperature and turn on
+  description: Cooperatively release one enrolled white-light lamp and apply its exact Kelvin and brightness state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+    kelvin:
+      name: Colour temperature
+      required: true
+      selector:
+        number:
+          min: 1700
+          max: 6500
+          step: 1
+          unit_of_measurement: K
+          mode: box
+    brightness_pct:
+      name: Brightness
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+turn_on:
+  name: Turn on enrolled lamp
+  description: Release one enrolled lamp from its show and turn it on with its fresh supported state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+turn_off:
+  name: Turn off enrolled lamp
+  description: Release one enrolled lamp from its show and turn it off preserving its fresh supported state.
+  fields:
+    entity_id:
+      name: Light entity
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: light
+
+start_scene:
+  name: Start saved LightCadence scene
+  description: Start the current saved scene revision using its enrolled zone, optional spatial path and explicitly named live audio source.
+  fields:
+    scene_id:
+      name: Saved scene UUID
+      required: true
+      selector:
+        text:
+    audio_source_name:
+      name: Unique live audio source name
+      selector:
+        text:
+    floorplan_id:
+      name: Floorplan UUID (with path ID)
+      selector:
+        text:
+    path_id:
+      name: Effect path ID (with floorplan UUID)
+      selector:
+        text:
+stop_scene:
+  name: Stop saved LightCadence scene
+  description: Stop the unique active session explicitly launched from this scene, applying its existing stop policy.
+  fields:
+    scene_id:
+      name: Saved scene UUID
+      required: true
+      selector:
+        text:

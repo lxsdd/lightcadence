@@ -1,0 +1,692 @@
+import {test} from "node:test";
+import assert from "node:assert/strict";
+import {chromium} from "playwright";
+import {createServer} from "node:http";
+import {readFile} from "node:fs/promises";
+const bundle=await readFile(new URL("../../custom_components/lightcadence/frontend/panel.js",import.meta.url));
+const server=createServer((req,res)=>{
+  if(req.url==="/panel.js"){res.setHeader("Content-Type","text/javascript");res.end(bundle);return;}
+  res.setHeader("Content-Type","text/html");res.end('<!doctype html><meta name="viewport" content="width=device-width"><script type="module" src="/panel.js"></script><lightcadence-panel></lightcadence-panel>');
+});
+await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
+const origin="http://127.0.0.1:"+server.address().port;
+const browser=await chromium.launch({headless:true});
+try {
+  for(const viewport of [{width:1280,height:900},{width:390,height:844}]) {
+    await test("production Lit preview path "+viewport.width,async()=>{
+      const page=await browser.newPage({viewport});
+      const errors=[];page.on("pageerror",e=>errors.push(e.message));
+      await page.goto(origin);
+      await page.evaluate(async()=>{
+        await customElements.whenDefined("lightcadence-panel");
+        const el=document.querySelector("lightcadence-panel");
+        window.fixture={calls:[],sessions:[],targets:{},fail:false};
+        const f=window.fixture;
+        const snapshot=()=>({schema_version:1,instance_id:"synthetic",output_mode:"preview",physical_output_enabled:false,sessions:structuredClone(f.sessions),targets:structuredClone(f.targets)});
+        window.syntheticHA={callWS:async msg=>{
+          f.calls.push(structuredClone(msg));
+          if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null,observation:{source:"ha_cache",status:id==="a"?"cached_rgb":"incomplete_rgb",power:id==="a",color_mode:"rgb",rgb:id==="a"?[64,128,255]:null,brightness:id==="a"?120:null}}))};
+          if(msg.type==="lightcadence/state")return snapshot();
+          const p=msg.payload;
+          if(f.fail){f.fail=false;throw {code:"device_conflict"};}
+          if(p.op==="start"){
+            f.sessions.push({id:p.request_id,zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect});
+            for(const id of p.devices)f.targets[id]={target:{red:1,green:0,blue:0,brightness:1}};
+          }else{
+            const s=f.sessions.find(s=>s.id===p.session_id);
+            if(s.revision!==p.revision)throw {code:"stale_revision"};
+            if(p.op==="detach"){s.devices=s.devices.filter(id=>id!==p.device_id);delete f.targets[p.device_id];s.revision++;}
+            else{s.devices.forEach(id=>delete f.targets[id]);s.phase="stopped";s.devices=[];s.revision++;}
+          }
+          return snapshot();
+        }};
+        el.hass=window.syntheticHA;
+      });
+      await page.getByText("Connected",{exact:true}).waitFor();
+      await page.getByText("On · RGB cached (HA cache, not device feedback)",{exact:true}).waitFor();
+      await page.getByText("Off · Incomplete RGB (HA cache, not device feedback)",{exact:true}).waitFor();
+      await page.getByRole("textbox",{name:"Zone name"}).fill("Zone A");
+      await page.getByRole("checkbox").nth(0).check();
+      await page.getByRole("checkbox").nth(1).check();
+      await page.getByRole("button",{name:"Start preview"}).click();
+      await page.getByRole("heading",{name:"Zone A"}).waitFor();
+      assert.equal(await page.locator(".swatch").count(),2);
+      await page.getByRole("button",{name:"Detach"}).first().click();
+      await page.waitForFunction(()=>document.querySelector("lightcadence-panel").shadowRoot.querySelectorAll(".swatch").length===1);
+      assert.equal(await page.evaluate(()=>window.fixture.calls.filter(x=>x.payload?.op==="detach").at(-1).payload.revision),1);
+      // Use the released lamp in a different, independent zone.
+      await page.getByRole("textbox",{name:"Zone name"}).fill("Zone B");
+      await page.getByRole("checkbox").first().check();
+      await page.getByRole("button",{name:"Start preview"}).click();
+      await page.getByRole("heading",{name:"Zone B"}).waitFor();
+      assert.equal(await page.getByRole("button",{name:"Stop preview"}).count(),2);
+      // Replace the view with another client; it must not issue a second start.
+      await page.evaluate(()=>{const el=document.createElement("lightcadence-panel");el.hass=window.syntheticHA;document.querySelector("lightcadence-panel").replaceWith(el);});
+      await page.getByRole("heading",{name:"Zone A"}).waitFor();
+      assert.equal(await page.evaluate(()=>window.fixture.calls.filter(x=>x.payload?.op==="start").length),2);
+      await page.locator("article").filter({has:page.getByRole("heading",{name:"Zone A"})}).getByRole("button",{name:"Stop preview"}).click();
+      await page.getByRole("heading",{name:"Zone B"}).waitFor();
+      await page.getByRole("button",{name:"Stop preview"}).click();
+      await page.getByText("No active previews.",{exact:false}).waitFor();
+      await page.getByRole("textbox",{name:"Zone name"}).fill("Zone C");
+      await page.getByRole("checkbox").first().check();
+      await page.evaluate(()=>window.fixture.fail=true);
+      await page.getByRole("button",{name:"Start preview"}).click();
+      await page.getByRole("status").filter({hasText:"already belongs"}).waitFor();
+      assert.equal(await page.getByRole("heading",{name:"Zone C"}).count(),0);
+      assert.equal(await page.evaluate(()=>document.querySelector("lightcadence-panel").shadowRoot.querySelector("main").scrollWidth<=innerWidth),true);
+      assert.deepEqual(errors,[]);
+      await page.close();
+    });
+  }
+  await test("physical candidate uses separate command with current instance",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.physicalCalls=[];
+      const s={schema_version:1,instance_id:"physical-instance",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a","missing"],sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        window.physicalCalls.push(structuredClone(msg));
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,enrollment:[{id:"a",entity_id:"light.a",name:"Lamp A",status:"registered",shared_ha_device:false,observation:{source:"ha_cache",status:"cached_kelvin",power:true,color_mode:"color_temp",rgb:null,brightness:100,kelvin:3200}},{id:"missing",entity_id:null,name:null,status:"missing_registry",shared_ha_device:false,observation:null}],lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.type==="lightcadence/physical" && msg.payload.op==="start")s.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];
+        if(msg.type==="lightcadence/physical" && msg.payload.op==="stop")s.sessions=[];
+        if(msg.type==="lightcadence/physical" && ["manual_set","manual_off"].includes(msg.payload.op)){
+          s.sessions=[];return {...structuredClone(s),manual_result:msg.payload.op==="manual_set"?"confirmed":"unconfirmed"};
+        }
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Hardware test workspace",{exact:true}).waitFor();
+    await page.getByText("Enrollment diagnostics · 2 enrolled · 1 need review",{exact:true}).click();
+    await page.getByText("missing · Missing registry entry",{exact:true}).waitFor();
+    await page.getByText("On · Kelvin cached · 3200 K (HA cache, not device feedback)",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.physicalCalls.filter(x=>x.payload).length),0);
+    await page.getByText("Enrollment diagnostics · 2 enrolled · 1 need review",{exact:true}).click();
+    await page.getByRole("textbox",{name:"Zone name"}).fill("Test zone");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Stop behaviour").selectOption("hold");
+    await page.getByRole("button",{name:"Start hardware test"}).click();
+    await page.getByRole("heading",{name:"Test zone"}).waitFor();
+    await page.getByRole("button",{name:"Stop show"}).click();
+    await page.getByText("No active shows.",{exact:false}).waitFor();
+    await page.getByLabel("Manual lamp",{exact:true}).selectOption("a");
+    await page.getByLabel("Manual colour").fill("#4080ff");
+    await page.getByLabel("Manual brightness (%)").fill("71");
+    await page.getByRole("button",{name:"Apply colour and turn on"}).click();
+    await page.getByRole("status").filter({hasText:"Manual state readback confirmed"}).waitFor();
+    await page.getByRole("button",{name:"Turn off lamp"}).click();
+    await page.getByRole("status").filter({hasText:"Manual outcome unconfirmed"}).waitFor();
+    const calls=await page.evaluate(()=>window.physicalCalls.filter(x=>x.payload));
+    assert.deepEqual(calls.map(x=>[x.type,x.payload.op,x.payload.instance_id]),["start","stop","manual_set","manual_off"].map(op=>["lightcadence/physical",op,"physical-instance"]));
+    assert.equal(calls[0].payload.stop_policy,"hold");
+    assert.deepEqual(calls[2].payload.state,{power:true,rgb:[64,128,255],brightness_pct:71});
+    assert.equal(calls[3].payload.device_id,"a");
+    await page.close();
+  });
+  await test("recovery blocks new commands and requires explicit decision",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.recoveryCalls=[];
+      const s={schema_version:1,instance_id:"restarted",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a"],sessions:[],targets:{},recovery_required:[{device_id:"a",record_id:"record",original:{power:true,target:{red:1,green:0,blue:0,brightness:.5}},policy:"restore",binding_matches:true}]};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.recoveryCalls.push(structuredClone(msg));s.recovery_required=[];return {...structuredClone(s),manual_result:"confirmed"};}
+        return structuredClone(s);
+      }};
+    });
+    await page.getByRole("heading",{name:"Recovery required",exact:true}).waitFor();
+    assert.equal(await page.getByRole("checkbox").isDisabled(),true);
+    await page.getByLabel("Manual lamp",{exact:true}).selectOption("a");
+    assert.equal(await page.getByRole("button",{name:"Turn off lamp"}).isDisabled(),true);
+    assert.equal(await page.evaluate(()=>window.recoveryCalls.length),0);
+    await page.getByRole("button",{name:"Keep current state"}).click();
+    await page.getByRole("status").filter({hasText:"Recovery resolved"}).waitFor();
+    assert.equal(await page.getByRole("checkbox").isDisabled(),false);
+    const calls=await page.evaluate(()=>window.recoveryCalls);
+    assert.deepEqual(calls.map(x=>x.payload),[{op:"recover",instance_id:"restarted",device_id:"a",record_id:"record",decision:"keep"}]);
+    await page.close();
+  });
+  await test("responsive HA content surface resizes without viewport changes",async()=>{
+    const page=await browser.newPage({viewport:{width:1920,height:1400}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      document.body.style.margin="0";
+      const el=document.querySelector("lightcadence-panel");
+      const parent=document.createElement("div");
+      parent.id="ha-content";
+      document.body.append(parent);parent.append(el);
+      const lights=Array.from({length:3},(_,i)=>({id:String(i),name:"Long lamp "+("identifier".repeat(8))+i,entity_id:"light.synthetic_"+i,available:true,area_id:null}));
+      const snapshot={schema_version:1,instance_id:"layout-test",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>msg.type==="lightcadence/catalog"?{schema_version:1,entries:["entry"],physical_output_enabled:false,lights}:snapshot};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    for(const [width,height] of [[1600,1200],[1100,950],[800,850],[680,900],[390,844],[320,640],[900,420],[620,420],[1600,1200]]){
+      const rect=await page.evaluate(async ([w,h])=>{
+        const parent=document.querySelector("#ha-content");
+        parent.style.width=w+"px";parent.style.height=h+"px";
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        const el=parent.firstElementChild,root=el.shadowRoot;
+        const box=q=>{const x=root.querySelector(q).getBoundingClientRect();return {x:x.x,y:x.y,w:x.width,h:x.height,b:x.bottom,r:x.right};};
+        return {host:el.getBoundingClientRect().toJSON(),main:box("main"),left:box("section[aria-labelledby=setup]"),right:box(".right-stack"),workspace:box(".workspace"),scrollWidth:root.querySelector("main").scrollWidth,clientWidth:root.querySelector("main").clientWidth,innerScroll:[...root.querySelectorAll("main,.workspace,section,.right-stack")].some(x=>["auto","scroll","hidden","clip"].includes(getComputedStyle(x).overflowY))};
+      },[width,height]);
+      assert.ok(Math.abs(rect.host.width-width)<1,JSON.stringify(rect));
+      assert.ok(Math.abs(rect.main.w-width)<1,JSON.stringify(rect));
+      assert.ok(rect.main.h>=height-1,JSON.stringify(rect));
+      assert.ok(rect.scrollWidth<=rect.clientWidth+1,JSON.stringify(rect));
+      assert.equal(rect.innerScroll,false);
+      if(width>760){
+        assert.ok(Math.abs(rect.left.y-rect.right.y)<1,JSON.stringify(rect));
+        assert.ok(Math.abs(rect.left.b-rect.right.b)<1,JSON.stringify(rect));
+        assert.ok(rect.left.r<rect.right.x,JSON.stringify(rect));
+      }else{
+        assert.ok(rect.left.b<rect.right.y,JSON.stringify(rect));
+        assert.ok(Math.abs(rect.left.x-rect.right.x)<1,JSON.stringify(rect));
+        assert.ok(Math.abs(rect.left.w-rect.right.w)<1,JSON.stringify(rect));
+      }
+    }
+    await page.close();
+  });
+  await test("audio source selection and loss in original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.audioCalls=[];
+      const s={schema_version:1,instance_id:"audio",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},audio_sources:[{id:"pcm",name:"Local PCM",status:"live",bands:[.4,.2,.1],bpm:120,beat_count:4,kind:"pulse_monitor",clock_mapping:"local_read_monotonic",read_to_engine_seconds:.015,transport_jitter_seconds:.002}]};
+      window.audioFixture=s;
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.audioCalls.push(structuredClone(msg.payload));s.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];}
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByText("Digital monitor · Local read clock · Read-to-engine 15 ms · Transport jitter 2 ms",{exact:true}).waitFor();
+    await page.getByRole("textbox",{name:"Zone name"}).fill("Music");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("audio_spectrum");
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByLabel("Audio source",{exact:true}).selectOption("pcm");
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Music",exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.audioCalls[0].effect.audio_source),"pcm");
+    await page.evaluate(()=>{window.audioFixture.audio_sources[0].status="lost";window.audioFixture.audio_sources[0].bands=null;window.audioFixture.audio_sources[0].bpm=null;});
+    await page.getByText("Source lost — fading to ambient",{exact:false}).waitFor();
+    assert.equal(await page.evaluate(()=>window.audioCalls.length),1);
+    await page.close();
+  });
+  await test("library explicit save and load in original mobile panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.libraryCalls=[];
+      const s={schema_version:1,instance_id:"library",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:0,zones:[],scenes:[],persistent:true,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.libraryCalls.push(structuredClone(p));
+          if(p.op==="library_save"){s.library[p.kind].push({...p.value,id:p.kind==="zones"?"zone1":"scene1",revision:1});s.library.revision++;}
+          if(p.op==="start")s.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];
+        }
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("textbox",{name:"Zone name"}).fill("Test zone");
+    await page.getByRole("checkbox").check();
+    await page.getByRole("button",{name:"Save new zone"}).click();
+    await page.getByLabel("Saved zone",{exact:true}).selectOption("zone1");
+    await page.getByLabel("Scene name",{exact:true}).fill("Test scene");
+    await page.getByLabel("Effect",{exact:true}).selectOption("scanner");
+    await page.getByRole("button",{name:"Save new scene"}).click();
+    await page.getByLabel("Saved scene",{exact:true}).selectOption("scene1");
+    assert.equal(await page.getByLabel("Effect",{exact:true}).inputValue(),"scanner");
+    assert.equal(await page.evaluate(()=>window.libraryCalls.length),2);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Test zone",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.libraryCalls.map(x=>x.op)),["library_save","library_save","start"]);
+    await page.close();
+  });
+  await test("floor drawing and spatial start use original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.spatialCalls=[];
+      const state={schema_version:1,instance_id:"spatial",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:1,zones:[{id:"zone",name:"Synthetic zone",devices:["a","b"]}],scenes:[],floorplans:[],spatial_paths:[],persistent:false,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+        if(msg.payload){const p=msg.payload;window.spatialCalls.push(structuredClone(p));if(p.kind==="floorplans"){state.library.floorplans=[{...p.value,id:"floor",revision:1}];state.library.revision++;state.library.spatial_paths=[{floorplan_id:"floor",path_id:"path",name:"Test path",zone_id:"zone",positions:{a:0,b:.8},missing:[]}];}else if(p.op==="start"){state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];}}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Open floorplan editor"}).click();
+    await page.getByLabel("Floor name",{exact:true}).fill("Test floor");
+    await page.getByLabel("Geometry name",{exact:true}).fill("Room");
+    const surface=page.locator('svg[aria-label="Floor drawing surface"]');
+    await surface.scrollIntoViewIfNeeded();
+    const rect=await surface.boundingBox();
+    for(const [x,y] of [[.2,.2],[.8,.2],[.8,.8],[.2,.8]])await page.mouse.click(rect.x+rect.width*x,rect.y+rect.height*y);
+    await page.getByRole("button",{name:"Finish geometry"}).click();
+    await page.getByRole("button",{name:"Undo",exact:true}).click();
+    await page.getByRole("button",{name:"Redo",exact:true}).click();
+    await page.getByLabel("Selected geometry",{exact:true}).selectOption({label:"Room"});
+    await page.getByLabel("Vertex 1 X",{exact:true}).fill("1.5");
+    await page.getByLabel("Vertex 1 X",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Zoom in",exact:true}).click();
+    const zoomed=(await surface.getAttribute("viewBox")).split(" ").map(Number);
+    assert.deepEqual(zoomed,[2.5,2,5,4]);
+    await page.getByRole("button",{name:"Pan mode",exact:true}).click();
+    await surface.scrollIntoViewIfNeeded();
+    const box=await surface.boundingBox();
+    await page.mouse.move(box.x+box.width*.5,box.y+box.height*.5);
+    await page.mouse.down();
+    await page.mouse.move(box.x+box.width*.75,box.y+box.height*.5,{steps:4});
+    await page.mouse.up();
+    const moved=(await surface.getAttribute("viewBox")).split(" ").map(Number);
+    assert.ok(moved[0]<zoomed[0]);
+    assert.equal(await page.getByRole("button",{name:"Finish geometry"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Pan right",exact:true}).click();
+    assert.ok(Number((await surface.getAttribute("viewBox")).split(" ")[0])>moved[0]);
+    await page.getByRole("button",{name:"Grid",exact:true}).click();
+    assert.equal(await page.getByRole("button",{name:"Grid",exact:true}).getAttribute("aria-pressed"),"false");
+    await page.getByRole("button",{name:"Fit floor",exact:true}).click();
+    assert.equal(await surface.getAttribute("viewBox"),"0 0 10 8");
+    await page.getByRole("button",{name:"Pan mode",exact:true}).click();
+    await page.getByRole("button",{name:"Insert vertex after 1",exact:true}).click();
+    await page.getByLabel("Vertex 5 X",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Remove vertex 2",exact:true}).click();
+    assert.equal(await page.getByLabel("Vertex 5 X",{exact:true}).count(),0);
+    await page.getByLabel("Selected geometry name",{exact:true}).fill("Renamed room");
+    await page.getByLabel("Selected geometry name",{exact:true}).press("Tab");
+    assert.equal(await page.evaluate(()=>window.spatialCalls.length),0);
+    await page.getByRole("button",{name:"Save floor",exact:true}).click();
+    await page.getByText("Floor library updated.",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.spatialCalls[0].value.features[0].name),"Renamed room");
+    assert.equal(await page.evaluate(()=>window.spatialCalls[0].value.features[0].points.length),4);
+    assert.equal(await page.evaluate(()=>window.spatialCalls[0].value.features[0].points[0][0]),1.5);
+    await page.getByRole("button",{name:"Hide floorplan editor"}).click();
+    await page.getByLabel("Saved zone",{exact:true}).selectOption("zone");
+    await page.getByLabel("Spatial effect path",{exact:true}).selectOption("floor/path");
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Synthetic zone",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.spatialCalls.at(-1).positions),{a:0,b:.8});
+    await page.close();
+  });
+  await test("layer stack editing, order and explicit start",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.layerCalls=[];
+      const state={schema_version:1,instance_id:"layers",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){window.layerCalls.push(structuredClone(msg.payload));state.sessions=[{id:"show",zone_id:msg.payload.zone_id,phase:"running",revision:1,devices:["a"],effect:msg.payload.effect}];}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Layers");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("layered");
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add layer"}).click();
+    await page.getByRole("button",{name:"Add layer"}).click();
+    await page.getByLabel("Layer 2 effect",{exact:true}).selectOption("scanner");
+    await page.getByLabel("Layer 2 blend",{exact:true}).selectOption("add");
+    await page.getByRole("button",{name:"Move layer 2 down"}).click();
+    assert.equal(await page.getByLabel("Layer 1 effect",{exact:true}).inputValue(),"scanner");
+    assert.equal(await page.evaluate(()=>window.layerCalls.length),0);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Layers",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.layerCalls[0].effect.layers.map(l=>[l.effect.kind,l.blend])),[["scanner","add"],["static","over"]]);
+    await page.close();
+  });
+  await test("timeline tracks clips keyframes and original explicit start",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.timelineCalls=[];
+      const state={schema_version:1,instance_id:"timeline",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.timelineCalls.push(structuredClone(p));
+          if(p.op==="start")state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:["a"],effect:p.effect,timeline:{duration:6,playhead:2,ended:false,loop:true,paused:false}}];
+          else if(p.op==="timeline_control"){const s=state.sessions[0];if(p.revision!==s.revision)throw {code:"stale_revision"};s.revision++;if(p.action==="seek")s.timeline.playhead=p.position;else s.timeline.paused=p.action==="pause";}
+        }
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Timeline test");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByLabel("Clip duration",{exact:true}).fill("6");
+    await page.getByLabel("Clip duration",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Add keyframe",exact:true}).click();
+    await page.getByLabel("Key 1 value",{exact:true}).fill(".2");
+    await page.getByLabel("Key 1 value",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    const bar=page.getByRole("button",{name:"Move clip 1/2",exact:true});
+    await bar.scrollIntoViewIfNeeded();
+    const bounds=await bar.boundingBox();
+    await page.mouse.move(bounds.x+bounds.width/2,bounds.y+bounds.height/2);
+    await page.mouse.down();await page.mouse.move(bounds.x+bounds.width/2-30,bounds.y+bounds.height/2,{steps:4});await page.mouse.up();
+    const moved=Number(await page.getByLabel("Clip start",{exact:true}).inputValue());
+    assert.ok(moved>=0&&moved<6);
+    await page.getByRole("button",{name:"Remove clip",exact:true}).click();
+    assert.equal(await page.evaluate(()=>window.timelineCalls.length),0);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Timeline test",exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.timelineCalls[0].effect.tracks[0].clips[0].duration),6);
+    assert.equal(await page.evaluate(()=>window.timelineCalls[0].effect.tracks[0].clips[0].keyframes[0].value),.2);
+    await page.getByText("Timeline · 2.00 / 6.00 s · Looping",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Pause timeline",exact:true}).click();
+    await page.getByText("Timeline · 2.00 / 6.00 s · Paused",{exact:true}).waitFor();
+    await page.getByLabel("Seek to seconds",{exact:true}).fill("4");
+    await page.getByRole("button",{name:"Seek timeline",exact:true}).click();
+    await page.getByText("Timeline · 4.00 / 6.00 s · Paused",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Resume timeline",exact:true}).click();
+    await page.getByText("Timeline · 4.00 / 6.00 s · Looping",{exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.timelineCalls.slice(1).map(p=>[p.action,p.revision,p.instance_id])),[["pause",1,"timeline"],["seek",2,"timeline"],["resume",3,"timeline"]]);
+    await page.close();
+  });
+  await test("track targets and explicit one-shot end action",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.maskCalls=[];
+      const state={schema_version:1,instance_id:"masks",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null}))};
+        if(msg.payload){const p=msg.payload;window.maskCalls.push(structuredClone(p));state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Masked timeline");
+    await page.getByRole("checkbox").nth(0).check();
+    await page.getByRole("checkbox").nth(1).check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByRole("button",{name:"Choose track lamps",exact:true}).click();
+    await page.getByRole("button",{name:"Track 1 target Lamp b",exact:true}).click();
+    assert.equal(await page.getByRole("button",{name:"Start preview"}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).nth(1).click();
+    await page.getByRole("button",{name:"Choose track lamps",exact:true}).click();
+    await page.getByRole("button",{name:"Track 2 target Lamp a",exact:true}).click();
+    await page.getByLabel("Loop timeline",{exact:true}).uncheck();
+    await page.getByLabel("Timeline end action",{exact:true}).selectOption("stop");
+    assert.equal(await page.evaluate(()=>window.maskCalls.length),0);
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Masked timeline",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.maskCalls[0].effect.tracks.map(t=>t.devices)),[["a"],["b"]]);
+    assert.equal(await page.evaluate(()=>window.maskCalls[0].effect.auto_end),true);
+    await page.close();
+  });
+  await test("live mixer sends current revision and instance on mobile",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.mixCalls=[];
+      const state={schema_version:1,instance_id:"mix",output_mode:"preview",physical_output_enabled:false,targets:{},sessions:[{id:"show",zone_id:"Mix test",phase:"running",revision:1,devices:["a"],effect:{kind:"layered",layers:[{effect:{kind:"static"}},{effect:{kind:"scanner"}}]},mix:{master:1,groups:[{gain:1,muted:false,solo:false},{gain:1,muted:false,solo:false}]}}]};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.mixCalls.push(structuredClone(p));const s=state.sessions[0];
+          if(p.action==="master")s.mix.master=p.value;
+          if(p.action==="mute")s.mix.groups[p.index].muted=p.value;
+          if(p.action==="solo")s.mix.groups[p.index].solo=p.value;
+          s.revision++;}
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByText("Live mixer",{exact:true}).click();
+    await page.getByRole("button",{name:"Mute 1",exact:true}).click();
+    await page.getByRole("button",{name:"Unmute 1",exact:true}).waitFor();
+    await page.getByRole("button",{name:"Solo 2",exact:true}).click();
+    await page.getByRole("button",{name:"Clear solo 2",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.mixCalls.map(p=>[p.action,p.index,p.revision,p.instance_id])),[["mute",0,1,"mix"],["solo",1,2,"mix"]]);
+    await page.close();
+  });
+  await test("musical timebase tempo map and marker seek through original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.tempoCalls=[];
+      const state={schema_version:1,instance_id:"tempo",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.tempoCalls.push(structuredClone(p));
+          if(p.op==="start")state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect,timeline:{duration:6,playhead:0,ended:false,loop:true,beat:0,duration_beats:8,markers:[{name:"Bridge",time:4,seconds:2}]}}];
+          else if(p.op==="timeline_control"){state.sessions[0].revision++;state.sessions[0].timeline.playhead=p.position;}
+        }
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("Musical timeline");
+    await page.getByRole("checkbox").check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    await page.getByLabel("Timeline timebase",{exact:true}).selectOption("beats");
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByLabel("Clip duration",{exact:true}).fill("8");
+    await page.getByLabel("Clip duration",{exact:true}).press("Tab");
+    assert.equal(await page.getByLabel("Timeline timebase",{exact:true}).isDisabled(),true);
+    await page.getByRole("button",{name:"Add tempo change",exact:true}).click();
+    await page.getByLabel("Tempo 2 BPM",{exact:true}).fill("60");
+    await page.getByLabel("Tempo 2 BPM",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Add marker",exact:true}).click();
+    await page.getByLabel("Marker 1 name",{exact:true}).fill("Bridge");
+    await page.getByLabel("Marker 1 time",{exact:true}).fill("4");
+    await page.getByLabel("Marker 1 time",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Start preview"}).click();
+    await page.getByRole("heading",{name:"Musical timeline",exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.tempoCalls[0].effect.tempo_map),[{beat:0,bpm:120},{beat:4,bpm:60}]);
+    assert.deepEqual(await page.evaluate(()=>window.tempoCalls[0].effect.markers),[{time:4,name:"Bridge"}]);
+    await page.getByRole("button",{name:"Seek marker: Bridge",exact:true}).click();
+    await page.waitForFunction(()=>window.tempoCalls.length===2);
+    assert.equal(await page.evaluate(()=>window.tempoCalls[1].position),2);
+    await page.close();
+  });
+  await test("native HA scene inspection and explicit import in original panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.nativeCalls=[];
+      const s={schema_version:1,instance_id:"native-import",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:0,zones:[],scenes:[],persistent:true,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.type==="lightcadence/ha_scenes")return [{id:"native-a",name:"Native RGB",entity_id:"scene.rgb",native:true},{id:"external",name:"External",entity_id:"scene.external",native:false}];
+        if(msg.type==="lightcadence/ha_scene_inspect")return {scene_id:"native-a",entity_id:"scene.rgb",name:"Native RGB",fingerprint:"fingerprint",importable:true,targets:[{device_id:"a",entity_id:"light.a",rgb:[32,64,128],brightness:100}],problems:[]};
+        if(msg.type==="lightcadence/ha_scene_import"){window.nativeCalls.push(structuredClone(msg));s.library.revision++;return structuredClone(s);}
+        if(msg.payload)window.nativeCalls.push(structuredClone(msg));
+        return structuredClone(s);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByText("Import native HA scene",{exact:true}).click();
+    await page.getByRole("button",{name:"Load HA scenes",exact:true}).click();
+    await page.getByLabel("Native HA scene",{exact:true}).selectOption("native-a");
+    await page.getByRole("button",{name:"Inspect saved targets",exact:true}).click();
+    await page.getByText("All targets supported",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.nativeCalls.length),0);
+    await page.getByLabel("Imported scene name",{exact:true}).fill("Local copy");
+    await page.getByRole("button",{name:"Import new local scene",exact:true}).click();
+    await page.getByText("New local zone and scene imported — no HA scene or lamp changed",{exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.nativeCalls),[{type:"lightcadence/ha_scene_import",entry_id:"entry",scene_id:"native-a",fingerprint:"fingerprint",name:"Local copy",revision:0,instance_id:"native-import"}]);
+    await page.close();
+  });
+
+  await test("explicit Kelvin scene roundtrip and timeline editing in the real mobile panel",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    const errors=[];page.on("pageerror",e=>errors.push(e.message));
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const el=document.querySelector("lightcadence-panel");
+      window.whiteCalls=[];
+      const state={schema_version:1,instance_id:"white-scene",output_mode:"preview",physical_output_enabled:false,sessions:[],targets:{},library:{revision:0,zones:[],scenes:[],persistent:true,fault:false}};
+      el.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:false,lights:[{id:"a",name:"Lamp A",entity_id:"light.a",available:true,area_id:null}]};
+        if(msg.payload){const p=msg.payload;window.whiteCalls.push(structuredClone(p));
+          if(p.op==="library_save"){state.library[p.kind].push({...p.value,id:p.kind==="zones"?"zone1":"scene1",revision:1});state.library.revision++;}
+          if(p.op==="start"){state.sessions=[{id:"show",zone_id:p.zone_id,phase:"running",revision:1,devices:p.devices,effect:p.effect}];state.targets={a:{target:{red:1,green:1,blue:1,brightness:p.effect.brightness,...(p.effect.kind==="white"?{kelvin:p.effect.kelvin}:{})}}};}
+          if(p.op==="stop"){state.sessions=[];state.targets={};}
+        }
+        return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("White zone");
+    await page.getByRole("checkbox").first().check();
+    await page.getByRole("button",{name:"Save new zone",exact:true}).click();
+    await page.getByLabel("Saved zone",{exact:true}).selectOption("zone1");
+    await page.getByLabel("Scene name",{exact:true}).fill("Warm scene");
+    await page.getByLabel("Effect",{exact:true}).selectOption("white");
+    const kelvin=page.getByLabel("White temperature (K)",{exact:true});
+    await kelvin.fill("7000");
+    assert.equal(await page.getByRole("button",{name:"Save new scene",exact:true}).isDisabled(),true);
+    assert.equal(await page.getByRole("button",{name:"Start preview",exact:true}).isDisabled(),true);
+    await kelvin.fill("3150");
+    await page.getByRole("button",{name:"Save new scene",exact:true}).click();
+    await page.getByLabel("Effect",{exact:true}).selectOption("scanner");
+    await page.getByLabel("Saved scene",{exact:true}).selectOption("scene1");
+    assert.equal(await page.getByLabel("Effect",{exact:true}).inputValue(),"white");
+    assert.equal(await kelvin.inputValue(),"3150");
+    await page.getByRole("button",{name:"Start preview",exact:true}).click();
+    await page.getByText("Lamp A · 3150 K",{exact:true}).waitFor();
+    const commands=await page.evaluate(()=>window.whiteCalls);
+    assert.equal(commands[1].value.effect.kelvin,3150);
+    assert.deepEqual(commands[1].value.effect.color,[1,1,1]);
+    assert.equal(commands[2].effect.kelvin,3150);
+    await page.getByRole("button",{name:"Stop preview",exact:true}).click();
+    await page.getByText("No active previews.",{exact:false}).waitFor();
+    await page.getByLabel("Zone name",{exact:true}).fill("White timeline");
+    await page.getByRole("checkbox").first().check();
+    await page.getByLabel("Effect",{exact:true}).selectOption("timeline");
+    await page.getByRole("button",{name:"Add track",exact:true}).click();
+    await page.getByRole("button",{name:"Add clip",exact:true}).click();
+    await page.getByLabel("Clip effect",{exact:true}).selectOption("white");
+    await page.getByLabel("Clip Kelvin",{exact:true}).fill("3600");
+    await page.getByLabel("Clip Kelvin",{exact:true}).press("Tab");
+    await page.getByLabel("Clip effect",{exact:true}).selectOption("static");
+    assert.equal(await page.getByLabel("Clip Kelvin",{exact:true}).count(),0);
+    await page.getByLabel("Clip effect",{exact:true}).selectOption("white");
+    await page.getByLabel("Clip Kelvin",{exact:true}).fill("3700");
+    await page.getByLabel("Clip Kelvin",{exact:true}).press("Tab");
+    await page.getByRole("button",{name:"Start preview",exact:true}).click();
+    await page.getByRole("heading",{name:"White timeline",exact:true}).waitFor();
+    const last=await page.evaluate(()=>window.whiteCalls.at(-1));
+    assert.equal(last.effect.tracks[0].clips[0].layer.effect.kelvin,3700);
+    assert.deepEqual(last.effect.tracks[0].clips[0].layer.effect.color,[1,1,1]);
+    assert.deepEqual(errors,[]);
+    await page.close();
+  });
+  await test("calibration assistant compares and saves raw visual anchors on mobile",async()=>{
+    const page=await browser.newPage({viewport:{width:390,height:844}});
+    const errors=[];page.on("pageerror",e=>errors.push(e.message));
+    await page.goto(origin);
+    await page.evaluate(async()=>{
+      await customElements.whenDefined("lightcadence-panel");
+      const panel=document.querySelector("lightcadence-panel");
+      const binding={model:"synthetic",firmware:"1",transport:"chroma_v2"};
+      const state={schema_version:1,instance_id:"calibration",output_mode:"physical_candidate",physical_output_enabled:true,hardware_qualified:false,enrolled_devices:["a","b"],sessions:[],targets:{},calibration_bindings:{a:binding,b:binding},library:{revision:0,zones:[],scenes:[],calibrations:[],persistent:true,fault:false}};
+      window.calibrationCalls=[];
+      const linear=v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;};
+      panel.hass={callWS:async msg=>{
+        if(msg.type==="lightcadence/catalog")return {schema_version:1,entries:["entry"],physical_output_enabled:true,lights:["a","b"].map(id=>({id,name:"Lamp "+id,entity_id:"light."+id,available:true,area_id:null,...(id==="a"?{transport:{kind:"yeelight_tcp",ct_min_kelvin:2700,ct_max_kelvin:6500}}:{})}))};
+        if(msg.payload){const p=msg.payload;window.calibrationCalls.push(structuredClone(p));
+          if(p.op==="calibration_start")state.sessions=[{id:"compare",zone_id:"Calibration comparison",phase:"running",revision:1,devices:p.devices,effect:{kind:"static"},comparison:{reference:p.reference,targets:{}}}];
+          if(p.op==="calibration_adjust")state.sessions[0].revision++;
+          if(p.op==="calibration_start"||p.op==="calibration_adjust")state.sessions[0].comparison.targets=Object.fromEntries(Object.entries(p.targets).map(([id,t])=>[id,t.kelvin?{red:1,green:1,blue:1,brightness:t.brightness,kelvin:t.kelvin}:{red:linear(t.rgb[0]),green:linear(t.rgb[1]),blue:linear(t.rgb[2]),brightness:t.brightness}]));
+          if(p.op==="library_save"){state.library.revision++;state.library.calibrations=[{id:"profile",revision:1,...p.value}];}
+          if(p.op==="calibration_project")return {...structuredClone(state),calibration_projection:{instance_id:"calibration",revision:state.library.revision,targets:{a:{ha:{state:"on",rgb_color:[255,255,255],brightness:128},native:{}},b:{ha:{state:"on",rgb_color:[240,245,255],brightness:128},native:{}}}}};
+          if(p.op==="stop"){state.sessions=[];}
+        }return structuredClone(state);
+      }};
+    });
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Open calibration assistant"}).click();
+    await page.getByLabel("Calibration reference",{exact:true}).selectOption("a");
+    await page.getByLabel("Calibration lamp",{exact:true}).selectOption("b");
+    await page.getByRole("button",{name:"Start comparison",exact:true}).click();
+    await page.getByRole("button",{name:"Apply comparison targets",exact:true}).waitFor();
+    await page.getByLabel("Calibration command colour",{exact:true}).fill("#f0f5ff");
+    await page.getByRole("button",{name:"Apply comparison targets",exact:true}).click();
+    await page.getByText("Engine targets accepted — visually check both lamps before recording.",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Record colour point",exact:true}).click();
+    await page.getByRole("button",{name:"Record brightness point",exact:true}).click();
+    await page.getByLabel("Profile name",{exact:true}).fill("Visual correction");
+    await page.getByRole("button",{name:"Save calibration profile",exact:true}).click();
+    await page.getByText("Library updated — no lamp commands sent",{exact:true}).waitFor();
+    const calls=await page.evaluate(()=>window.calibrationCalls);
+    assert.deepEqual(calls.map(p=>p.op),["calibration_start","calibration_adjust","library_save"]);
+    assert.equal(calls[1].revision,1);
+    assert.deepEqual(calls[2].value.points,[{goal:[255,255,255],command:[240,245,255]}]);
+    await page.getByLabel("Profile name",{exact:true}).fill("Updated visual correction");
+    await page.getByRole("button",{name:"Save calibration profile",exact:true}).click();
+    await page.getByText("Library updated — no lamp commands sent",{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.calibrationCalls.at(-1).id),"profile");
+    assert.equal(await page.evaluate(()=>window.calibrationCalls.at(-1).revision),1);
+    const beforeReconnect=await page.evaluate(()=>window.calibrationCalls.length);
+    await page.evaluate(()=>{const old=document.querySelector("lightcadence-panel");const panel=document.createElement("lightcadence-panel");panel.hass=old.hass;old.replaceWith(panel);});
+    await page.getByText("Connected",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Open calibration assistant"}).click();
+    await page.getByRole("button",{name:"Resume comparison: Lamp a / Lamp b",exact:true}).click();
+    await page.getByText("Engine targets accepted — visually check both lamps before recording.",{exact:true}).waitFor();
+    assert.equal(await page.getByLabel("Calibration command colour",{exact:true}).inputValue(),"#f0f5ff");
+    assert.equal(await page.evaluate(()=>window.calibrationCalls.length),beforeReconnect);
+    await page.getByLabel("Load existing profile",{exact:true}).selectOption("profile");
+    assert.equal(await page.getByLabel("Profile name",{exact:true}).inputValue(),"Updated visual correction");
+    await page.getByRole("button",{name:"Calculate common-goal HA targets"}).click();
+    await page.getByLabel("Common-goal HA targets",{exact:true}).waitFor();
+    assert.ok((await page.getByLabel("Common-goal HA targets",{exact:true}).inputValue()).includes("light.b"));
+    await page.getByLabel("Calibration goal colour",{exact:true}).fill("#fff0e0");
+    await page.getByLabel("Common-goal HA targets",{exact:true}).waitFor({state:"detached"});
+    await page.getByLabel("Calibration goal colour",{exact:true}).fill("#ffffff");
+    await page.getByRole("button",{name:"Stop show",exact:true}).click();
+    await page.getByText("No active shows.",{exact:false}).waitFor();
+    await page.getByLabel("Native Kelvin comparison",{exact:true}).check();
+    await page.getByLabel("Calibration reference",{exact:true}).selectOption("a");
+    await page.getByRole("button",{name:"Start comparison",exact:true}).click();
+    await page.getByText("Engine targets accepted — visually check both lamps before recording.",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"Record white point",exact:true}).click();
+    await page.getByText("white anchors: 1",{exact:false}).waitFor();
+    const white=await page.evaluate(()=>window.calibrationCalls.at(-1));
+    assert.deepEqual(white.targets.a,{kelvin:3000,brightness:.5});
+    assert.deepEqual(white.targets.b,{rgb:[240,245,255],brightness:.5});
+    await page.getByRole("button",{name:"Stop show",exact:true}).click();
+    await page.getByText("No active shows.",{exact:false}).waitFor();
+    assert.deepEqual(errors,[]);
+    await page.close();
+  });
+} finally {await browser.close();await new Promise(resolve=>server.close(resolve));}
